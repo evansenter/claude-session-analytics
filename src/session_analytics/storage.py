@@ -306,6 +306,22 @@ class SQLiteStorage:
             cursor = conn.execute(sql, params)
             return cursor.rowcount
 
+    def executemany(self, sql: str, params_seq: list[tuple]) -> int:
+        """Execute a SQL statement with multiple parameter sets.
+
+        This is the public API for batch INSERT/UPDATE/DELETE operations.
+
+        Args:
+            sql: SQL statement with placeholders
+            params_seq: Sequence of parameter tuples
+
+        Returns:
+            Total number of rows affected
+        """
+        with self._connect() as conn:
+            cursor = conn.executemany(sql, params_seq)
+            return cursor.rowcount
+
     def _get_schema_version(self, conn: sqlite3.Connection) -> int:
         """Get current schema version from database."""
         try:

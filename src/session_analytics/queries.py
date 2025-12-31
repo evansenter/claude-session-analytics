@@ -907,7 +907,13 @@ def classify_sessions(
         build_pct = (row["build_count"] or 0) / total
         error_pct = (row["error_count"] or 0) / total
 
-        # Classification heuristics
+        # Classification heuristics based on activity ratios
+        # Thresholds derived from typical session patterns:
+        # - Debugging: High error rate signals troubleshooting (>15% or 5+ errors)
+        # - Development: Heavy editing indicates feature work (>30% edits or 3+ writes)
+        # - Maintenance: Git/build focus without editing (>30% combined)
+        # - Research: Mostly reading/searching codebase (>50% combined)
+        # - Mixed: No dominant pattern, balanced activity
         if error_pct > 0.15 or (row["error_count"] or 0) > 5:
             category = "debugging"
             confidence = min(1.0, error_pct * 3)

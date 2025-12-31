@@ -696,12 +696,46 @@ class TestAnalyzeTrends:
         assert result["compare_to"] == "previous"
 
     def test_compare_to_same_last_month(self, storage):
-        """Test compare_to='same_last_month' mode."""
+        """Test compare_to='same_last_month' mode compares to same week last month."""
         from session_analytics.patterns import analyze_trends
+
+        now = datetime.now()
+
+        # Add events in current week
+        current_events = [
+            Event(
+                id=None,
+                uuid=f"slm-c{i}",
+                timestamp=now - timedelta(days=2),
+                session_id="current-session",
+                entry_type="tool_use",
+                tool_name="Read",
+            )
+            for i in range(10)
+        ]
+
+        # Add events in same week last month (~28 days ago)
+        last_month_events = [
+            Event(
+                id=None,
+                uuid=f"slm-p{i}",
+                timestamp=now - timedelta(days=30),
+                session_id="last-month-session",
+                entry_type="tool_use",
+                tool_name="Read",
+            )
+            for i in range(8)
+        ]
+
+        storage.add_events_batch(current_events + last_month_events)
 
         result = analyze_trends(storage, days=7, compare_to="same_last_month")
 
         assert result["compare_to"] == "same_last_month"
+        # Should compare current 7 days to 7 days starting ~28 days ago
+        assert result["metrics"]["events"]["current"] == 10
+        assert result["metrics"]["events"]["previous"] == 8
+        assert result["metrics"]["events"]["direction"] == "up"
 
     def test_trend_unchanged_threshold(self, storage):
         """Test that changes within +/- 5% are marked as 'unchanged'."""

@@ -643,39 +643,46 @@ def correlate_git_with_sessions(
     all_commits = storage.get_git_commits(start=cutoff)
     commits = [c for c in all_commits if c.session_id is None]
 
-    correlated_count = 0
-    correlation_errors = 0
+    # Buffer of 5 minutes before session start and after session end
+    # Commits just before starting a session are often related preparatory work
+    buffer = timedelta(minutes=5)
+
+    # Collect correlations for batch update
+    correlations: list[tuple[str, str]] = []  # (session_id, sha)
 
     for commit in commits:
         commit_time = commit.timestamp
         if isinstance(commit_time, str):
             commit_time = datetime.fromisoformat(commit_time)
 
-        # Find matching session (commit made during session window + 5 min buffer)
+        # Find matching session (commit within session window ± 5 min buffer)
         for sr in session_ranges:
-            # Buffer of 5 minutes after session end
-            buffer = timedelta(minutes=5)
-            if sr["start"] <= commit_time <= (sr["end"] + buffer):
-                # Update commit with session ID
-                try:
-                    storage.execute_write(
-                        """
-                        UPDATE git_commits
-                        SET session_id = ?
-                        WHERE sha = ?
-                        """,
-                        (sr["session_id"], commit.sha),
-                    )
-                    correlated_count += 1
-                except Exception as e:
-                    logger.error(
-                        "Failed to correlate commit %s with session %s: %s",
-                        commit.sha[:8],
-                        sr["session_id"][:8] if sr["session_id"] else "unknown",
-                        e,
-                    )
-                    correlation_errors += 1
+            if (sr["start"] - buffer) <= commit_time <= (sr["end"] + buffer):
+                correlations.append((sr["session_id"], commit.sha))
                 break
+
+    # Batch update all correlations
+    correlated_count = 0
+    correlation_errors = 0
+
+    if correlations:
+        try:
+            storage.executemany(
+                """
+                UPDATE git_commits
+                SET session_id = ?
+                WHERE sha = ?
+                """,
+                correlations,
+            )
+            correlated_count = len(correlations)
+        except Exception as e:
+            logger.error(
+                "Failed to batch correlate %d commits: %s",
+                len(correlations),
+                e,
+            )
+            correlation_errors = len(correlations)
 
     return {
         "days": days,
