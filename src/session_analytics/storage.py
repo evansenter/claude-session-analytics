@@ -426,6 +426,46 @@ class SQLiteStorage:
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_git_commits_session ON git_commits(session_id)"
             )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_git_commits_project ON git_commits(project_path)"
+            )
+
+            # FTS5 full-text search on user_message_text (RFC #17 Phase 1)
+            conn.execute("""
+                CREATE VIRTUAL TABLE IF NOT EXISTS events_fts USING fts5(
+                    user_message_text,
+                    content='events',
+                    content_rowid='id'
+                )
+            """)
+
+            # Triggers to keep FTS in sync with events table
+            conn.execute("""
+                CREATE TRIGGER IF NOT EXISTS events_fts_insert AFTER INSERT ON events
+                WHEN NEW.user_message_text IS NOT NULL
+                BEGIN
+                    INSERT INTO events_fts(rowid, user_message_text) VALUES (NEW.id, NEW.user_message_text);
+                END
+            """)
+
+            conn.execute("""
+                CREATE TRIGGER IF NOT EXISTS events_fts_delete AFTER DELETE ON events
+                WHEN OLD.user_message_text IS NOT NULL
+                BEGIN
+                    INSERT INTO events_fts(events_fts, rowid, user_message_text)
+                    VALUES ('delete', OLD.id, OLD.user_message_text);
+                END
+            """)
+
+            conn.execute("""
+                CREATE TRIGGER IF NOT EXISTS events_fts_update AFTER UPDATE OF user_message_text ON events
+                BEGIN
+                    INSERT INTO events_fts(events_fts, rowid, user_message_text)
+                    VALUES ('delete', OLD.id, OLD.user_message_text);
+                    INSERT INTO events_fts(rowid, user_message_text)
+                    SELECT NEW.id, NEW.user_message_text WHERE NEW.user_message_text IS NOT NULL;
+                END
+            """)
 
             # Run any pending migrations
             current_version = self._get_schema_version(conn)
