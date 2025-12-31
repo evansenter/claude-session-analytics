@@ -1,7 +1,7 @@
 """Tests for the SQLite storage layer."""
 
 import tempfile
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -265,3 +265,125 @@ class TestDbStats:
         assert stats["session_count"] == 1
         assert stats["pattern_count"] == 1
         assert stats["db_path"] is not None
+
+
+class TestGitCommitOperations:
+    """Tests for git commit operations (RFC #17 Phase 1)."""
+
+    def test_add_git_commit(self, storage):
+        """Test adding a git commit."""
+        from session_analytics.storage import GitCommit
+
+        commit = GitCommit(
+            sha="abc123",
+            timestamp=datetime.now(),
+            message="Test commit",
+            session_id="session-1",
+            project_path="test-project",
+        )
+        storage.add_git_commit(commit)
+
+        commits = storage.get_git_commits()
+        assert len(commits) == 1
+        assert commits[0].sha == "abc123"
+        assert commits[0].message == "Test commit"
+
+    def test_add_git_commits_batch(self, storage):
+        """Test batch adding git commits."""
+        from session_analytics.storage import GitCommit
+
+        commits = [
+            GitCommit(sha="aaa111", timestamp=datetime.now(), message="Commit 1"),
+            GitCommit(sha="bbb222", timestamp=datetime.now(), message="Commit 2"),
+            GitCommit(sha="ccc333", timestamp=datetime.now(), message="Commit 3"),
+        ]
+        count = storage.add_git_commits_batch(commits)
+        assert count == 3
+
+        stored = storage.get_git_commits()
+        assert len(stored) == 3
+
+    def test_get_git_commits_with_filters(self, storage):
+        """Test filtering git commits."""
+        from session_analytics.storage import GitCommit
+
+        now = datetime.now()
+        yesterday = now - timedelta(days=1)
+        commits = [
+            GitCommit(sha="old1", timestamp=yesterday, project_path="project-a"),
+            GitCommit(sha="new1", timestamp=now, project_path="project-a"),
+            GitCommit(sha="new2", timestamp=now, project_path="project-b"),
+        ]
+        storage.add_git_commits_batch(commits)
+
+        # Filter by project
+        project_a = storage.get_git_commits(project_path="project-a")
+        assert len(project_a) == 2
+
+        # Filter by time range
+        recent = storage.get_git_commits(start=now - timedelta(hours=1))
+        assert len(recent) == 2
+
+    def test_git_commit_count(self, storage):
+        """Test getting git commit count."""
+        from session_analytics.storage import GitCommit
+
+        assert storage.get_git_commit_count() == 0
+
+        storage.add_git_commit(GitCommit(sha="test123"))
+        assert storage.get_git_commit_count() == 1
+
+
+class TestNewEventFields:
+    """Tests for RFC #17 Phase 1 Event fields (user_message_text, exit_code)."""
+
+    def test_event_with_user_message_text(self, storage):
+        """Test storing and retrieving user_message_text."""
+        event = Event(
+            id=None,
+            uuid="test-uuid",
+            timestamp=datetime.now(),
+            session_id="session-1",
+            entry_type="user",
+            user_message_text="Hello, please help me with something",
+        )
+        stored = storage.add_event(event)
+        assert stored.id is not None
+
+        events = storage.get_events_in_range()
+        assert len(events) == 1
+        assert events[0].user_message_text == "Hello, please help me with something"
+
+    def test_event_with_exit_code(self, storage):
+        """Test storing and retrieving exit_code."""
+        event = Event(
+            id=None,
+            uuid="bash-uuid",
+            timestamp=datetime.now(),
+            session_id="session-1",
+            entry_type="tool_result",
+            tool_name="Bash",
+            exit_code=1,
+        )
+        storage.add_event(event)
+
+        events = storage.get_events_in_range()
+        assert len(events) == 1
+        assert events[0].exit_code == 1
+
+    def test_event_with_all_new_fields(self, storage):
+        """Test event with all new fields populated."""
+        event = Event(
+            id=None,
+            uuid="full-uuid",
+            timestamp=datetime.now(),
+            session_id="session-1",
+            entry_type="user",
+            user_message_text="Run a command",
+            exit_code=0,
+        )
+        storage.add_event(event)
+
+        events = storage.get_events_in_range()
+        assert events[0].user_message_text == "Run a command"
+        assert events[0].exit_code == 0

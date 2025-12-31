@@ -10,6 +10,7 @@ except Exception:
 # Re-export public API
 from session_analytics.storage import (
     Event,
+    GitCommit,
     IngestionState,
     Pattern,
     Session,
@@ -25,4 +26,5 @@ __all__ = [
     "Session",
     "Pattern",
     "IngestionState",
+    "GitCommit",
 ]
