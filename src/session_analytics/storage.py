@@ -139,7 +139,7 @@ class GitCommit:
 DEFAULT_DB_PATH = Path.home() / ".claude" / "contrib" / "analytics" / "data.db"
 
 # Schema version for migrations
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 # Migration functions: dict of version -> (migration_name, migration_func)
 # Each migration upgrades FROM version-1 TO version
@@ -183,6 +183,54 @@ def migrate_v2(conn):
     conn.execute("CREATE INDEX IF NOT EXISTS idx_git_commits_timestamp ON git_commits(timestamp)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_git_commits_session ON git_commits(session_id)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_git_commits_project ON git_commits(project_path)")
+
+
+@migration(3, "add_user_message_fts")
+def migrate_v3(conn):
+    """Add FTS5 full-text search index on user_message_text for efficient text search."""
+    # Create FTS5 virtual table (content= points to external events table)
+    # Using content-less FTS (no redundant storage) with events.id as rowid
+    conn.execute("""
+        CREATE VIRTUAL TABLE IF NOT EXISTS events_fts USING fts5(
+            user_message_text,
+            content='events',
+            content_rowid='id'
+        )
+    """)
+
+    # Populate FTS index from existing events with non-null user_message_text
+    conn.execute("""
+        INSERT INTO events_fts(rowid, user_message_text)
+        SELECT id, user_message_text FROM events WHERE user_message_text IS NOT NULL
+    """)
+
+    # Create triggers to keep FTS in sync with events table
+    conn.execute("""
+        CREATE TRIGGER IF NOT EXISTS events_fts_insert AFTER INSERT ON events
+        WHEN NEW.user_message_text IS NOT NULL
+        BEGIN
+            INSERT INTO events_fts(rowid, user_message_text) VALUES (NEW.id, NEW.user_message_text);
+        END
+    """)
+
+    conn.execute("""
+        CREATE TRIGGER IF NOT EXISTS events_fts_delete AFTER DELETE ON events
+        WHEN OLD.user_message_text IS NOT NULL
+        BEGIN
+            INSERT INTO events_fts(events_fts, rowid, user_message_text)
+            VALUES ('delete', OLD.id, OLD.user_message_text);
+        END
+    """)
+
+    conn.execute("""
+        CREATE TRIGGER IF NOT EXISTS events_fts_update AFTER UPDATE OF user_message_text ON events
+        BEGIN
+            INSERT INTO events_fts(events_fts, rowid, user_message_text)
+            VALUES ('delete', OLD.id, OLD.user_message_text);
+            INSERT INTO events_fts(rowid, user_message_text)
+            SELECT NEW.id, NEW.user_message_text WHERE NEW.user_message_text IS NOT NULL;
+        END
+    """)
 
 
 class SQLiteStorage:
@@ -801,6 +849,33 @@ class SQLiteStorage:
         with self._connect() as conn:
             row = conn.execute("SELECT COUNT(*) as count FROM git_commits").fetchone()
             return row["count"]
+
+    # Full-text search operations
+
+    def search_user_messages(self, query: str, limit: int = 100) -> list[Event]:
+        """Search user messages using full-text search.
+
+        Args:
+            query: FTS5 query string (supports AND, OR, NOT, phrases, etc.)
+            limit: Maximum number of results
+
+        Returns:
+            List of Event objects matching the search query
+        """
+        with self._connect() as conn:
+            # Use FTS5 MATCH to search, join back to events for full data
+            rows = conn.execute(
+                """
+                SELECT events.* FROM events
+                INNER JOIN events_fts ON events.id = events_fts.rowid
+                WHERE events_fts MATCH ?
+                ORDER BY rank
+                LIMIT ?
+                """,
+                (query, limit),
+            ).fetchall()
+
+            return [self._row_to_event(row) for row in rows]
 
     # Utility operations
 

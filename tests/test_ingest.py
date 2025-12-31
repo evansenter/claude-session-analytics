@@ -229,6 +229,60 @@ class TestParseEntry:
         events = parse_entry(entry, "test-project")
         assert len(events) == 0
 
+    def test_user_message_text_truncation_at_boundary(self):
+        """Test that user_message_text is truncated at USER_MESSAGE_MAX_LENGTH (2000 chars)."""
+        from session_analytics.ingest import USER_MESSAGE_MAX_LENGTH
+
+        # Test content exactly at the limit - should not be truncated
+        exact_limit_content = "x" * USER_MESSAGE_MAX_LENGTH
+        entry_exact = {
+            "type": "user",
+            "uuid": "user-exact",
+            "sessionId": "session-1",
+            "timestamp": "2025-01-01T12:00:00.000Z",
+            "message": {"role": "user", "content": exact_limit_content},
+        }
+        events = parse_entry(entry_exact, "test-project")
+        assert len(events) == 1
+        assert len(events[0].user_message_text) == USER_MESSAGE_MAX_LENGTH
+
+        # Test content over the limit - should be truncated
+        over_limit_content = "y" * (USER_MESSAGE_MAX_LENGTH + 500)
+        entry_over = {
+            "type": "user",
+            "uuid": "user-over",
+            "sessionId": "session-1",
+            "timestamp": "2025-01-01T12:00:05.000Z",
+            "message": {"role": "user", "content": over_limit_content},
+        }
+        events = parse_entry(entry_over, "test-project")
+        assert len(events) == 1
+        assert len(events[0].user_message_text) == USER_MESSAGE_MAX_LENGTH
+        assert events[0].user_message_text == "y" * USER_MESSAGE_MAX_LENGTH
+
+    def test_user_message_text_truncation_with_list_content(self):
+        """Test truncation when content is a list of text blocks."""
+        from session_analytics.ingest import USER_MESSAGE_MAX_LENGTH
+
+        # Create content with multiple text blocks that exceed limit when joined
+        text_block = "z" * 1500
+        entry = {
+            "type": "user",
+            "uuid": "user-list",
+            "sessionId": "session-1",
+            "timestamp": "2025-01-01T12:00:00.000Z",
+            "message": {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": text_block},
+                    {"type": "text", "text": text_block},  # Combined: 3001 chars with space
+                ],
+            },
+        }
+        events = parse_entry(entry, "test-project")
+        assert len(events) == 1
+        assert len(events[0].user_message_text) == USER_MESSAGE_MAX_LENGTH
+
 
 class TestIngestFile:
     """Tests for file ingestion."""

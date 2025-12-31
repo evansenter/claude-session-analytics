@@ -73,6 +73,12 @@ class TestEventOperations:
         assert count == 5
         assert storage.get_event_count() == 5
 
+    def test_add_events_batch_empty(self, storage):
+        """Test batch add with empty list."""
+        count = storage.add_events_batch([])
+        assert count == 0
+        assert storage.get_event_count() == 0
+
     def test_get_events_in_range(self, storage):
         """Test filtering events by time range."""
         # Add events across different times
@@ -477,3 +483,95 @@ class TestNewEventFields:
         assert len(events) == 1
         assert events[0].user_message_text is None
         assert events[0].exit_code is None
+
+
+class TestFullTextSearch:
+    """Tests for full-text search on user_message_text."""
+
+    def test_search_user_messages_basic(self, storage):
+        """Test basic full-text search on user messages."""
+        # Add events with searchable text
+        storage.add_event(
+            Event(
+                id=None,
+                uuid="uuid-1",
+                timestamp=datetime.now(),
+                session_id="session-1",
+                entry_type="user",
+                user_message_text="Help me debug the authentication error",
+            )
+        )
+        storage.add_event(
+            Event(
+                id=None,
+                uuid="uuid-2",
+                timestamp=datetime.now(),
+                session_id="session-1",
+                entry_type="user",
+                user_message_text="Fix the database connection issue",
+            )
+        )
+        storage.add_event(
+            Event(
+                id=None,
+                uuid="uuid-3",
+                timestamp=datetime.now(),
+                session_id="session-1",
+                entry_type="user",
+                user_message_text="Another error message to debug",
+            )
+        )
+
+        # Search for "debug"
+        results = storage.search_user_messages("debug")
+        assert len(results) == 2
+        assert all("debug" in r.user_message_text.lower() for r in results)
+
+        # Search for "authentication"
+        results = storage.search_user_messages("authentication")
+        assert len(results) == 1
+        assert "authentication" in results[0].user_message_text.lower()
+
+    def test_search_user_messages_no_match(self, storage):
+        """Test search returns empty when no matches found."""
+        storage.add_event(
+            Event(
+                id=None,
+                uuid="uuid-1",
+                timestamp=datetime.now(),
+                session_id="session-1",
+                entry_type="user",
+                user_message_text="This is a test message",
+            )
+        )
+
+        results = storage.search_user_messages("nonexistent")
+        assert len(results) == 0
+
+    def test_search_user_messages_phrase(self, storage):
+        """Test searching for exact phrases."""
+        storage.add_event(
+            Event(
+                id=None,
+                uuid="uuid-1",
+                timestamp=datetime.now(),
+                session_id="session-1",
+                entry_type="user",
+                user_message_text="Run the unit tests",
+            )
+        )
+        storage.add_event(
+            Event(
+                id=None,
+                uuid="uuid-2",
+                timestamp=datetime.now(),
+                session_id="session-1",
+                entry_type="user",
+                user_message_text="Unit testing is important",
+            )
+        )
+
+        # Search for phrase "unit tests"
+        results = storage.search_user_messages('"unit tests"')
+        assert len(results) == 1
+        assert "unit tests" in results[0].user_message_text.lower()
