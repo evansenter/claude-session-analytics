@@ -865,6 +865,7 @@ def classify_sessions(
     where_clause = " AND ".join(where_parts)
 
     # Get activity stats per session
+    # Safe: where_clause is built from hardcoded condition strings above
     rows = storage.execute_query(
         f"""
         SELECT

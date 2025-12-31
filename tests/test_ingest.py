@@ -396,6 +396,49 @@ class TestIngestGitHistory:
         if "commits_found" in result:
             assert "commits_added" in result
 
+    def test_git_ingest_handles_malformed_output(self, storage):
+        """Test that malformed git log lines are skipped and counted."""
+        import tempfile
+        from pathlib import Path
+        from unittest.mock import MagicMock, patch
+
+        from session_analytics.ingest import ingest_git_history
+
+        # Create a fake git directory
+        with tempfile.TemporaryDirectory() as tmpdir:
+            git_dir = Path(tmpdir) / ".git"
+            git_dir.mkdir()
+
+            # Mock subprocess to return malformed output
+            mock_result = MagicMock()
+            mock_result.returncode = 0
+            mock_result.stdout = "\n".join(
+                [
+                    # Valid line (40 hex chars)
+                    "abc123def456789012345678901234567890abcd|Author|2025-01-15T10:00:00|Valid commit",
+                    # Missing fields (only 2 parts instead of 4)
+                    "def456|Author",
+                    # Empty line (should be skipped gracefully)
+                    "",
+                    # Missing message (only 3 parts)
+                    "1234567890abcdef1234567890abcdef12345678|Author|2025-01-15T11:00:00",
+                    # Invalid date format
+                    "fedcba0987654321fedcba0987654321fedcba09|Author|not-a-date|Bad date commit",
+                    # Another valid line (40 hex chars)
+                    "0123456789abcdef0123456789abcdef01234567|Author|2025-01-15T12:00:00|Another valid",
+                ]
+            )
+
+            with patch("subprocess.run", return_value=mock_result):
+                result = ingest_git_history(storage, repo_path=tmpdir, days=7)
+
+            # Should report skipped entries
+            assert result.get("skipped_malformed", 0) >= 2  # "def456|Author" and 3-part line
+            assert result.get("skipped_date_parse", 0) >= 1  # "not-a-date"
+            # Should still process valid commits (commits_parsed is successful parses)
+            assert result.get("commits_parsed", 0) == 2  # Two valid commits parsed
+            assert result.get("commits_added", 0) == 2  # Both added to storage
+
 
 class TestCorrelateGitWithSessions:
     """Tests for git-session correlation."""

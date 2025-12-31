@@ -202,11 +202,30 @@ def sample_sequences(
     """
     cutoff = datetime.now() - timedelta(days=days)
 
+    # Validate pattern input
+    if len(pattern) > 500:
+        return {
+            "pattern": pattern[:50] + "...",
+            "error": "Pattern too long (max 500 characters)",
+            "total_occurrences": 0,
+            "samples": [],
+        }
+
     # Parse pattern into tool list (support both "→" and "," separators)
     if " → " in pattern:
         target_tools = [t.strip() for t in pattern.split(" → ")]
     else:
         target_tools = [t.strip() for t in pattern.split(",")]
+
+    # Validate individual tool names (alphanumeric + underscore only)
+    for tool in target_tools:
+        if not tool or not all(c.isalnum() or c == "_" for c in tool):
+            return {
+                "pattern": pattern,
+                "error": f"Invalid tool name: '{tool}' (must be alphanumeric)",
+                "total_occurrences": 0,
+                "samples": [],
+            }
 
     sequence_length = len(target_tools)
     if sequence_length < 2:

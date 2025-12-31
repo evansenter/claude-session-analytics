@@ -500,7 +500,7 @@ def ingest_git_history(
     else:
         repo_path = Path(repo_path)
 
-    if not (repo_path / ".git").exists():
+    if not (repo_path / ".git").is_dir():
         return {
             "error": f"Not a git repository: {repo_path}",
             "commits_added": 0,
