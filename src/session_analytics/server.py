@@ -19,6 +19,8 @@ from pathlib import Path
 
 from fastmcp import FastMCP
 
+from session_analytics.storage import SQLiteStorage
+
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
@@ -31,6 +33,9 @@ if os.environ.get("DEV_MODE"):
 
 # Initialize MCP server
 mcp = FastMCP("session-analytics")
+
+# Initialize storage
+storage = SQLiteStorage()
 
 
 @mcp.resource("session-analytics://guide", description="Usage guide and best practices")
@@ -50,12 +55,14 @@ def get_status() -> dict:
     Returns:
         Status info including last ingestion time, event count, and DB size
     """
-    # Placeholder - will be implemented in Phase 2
+    stats = storage.get_db_stats()
+    last_ingest = storage.get_last_ingestion_time()
+
     return {
         "status": "ok",
         "version": "0.1.0",
-        "message": "Session analytics server is running. Storage layer not yet implemented.",
-        "db_path": str(Path.home() / ".claude" / "contrib" / "analytics" / "data.db"),
+        "last_ingestion": last_ingest.isoformat() if last_ingest else None,
+        **stats,
     }
 
 

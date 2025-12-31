@@ -10,6 +10,8 @@ def test_get_status():
     assert result["status"] == "ok"
     assert "version" in result
     assert "db_path" in result
+    assert "event_count" in result
+    assert "session_count" in result
 
 
 def test_ingest_logs_placeholder():
