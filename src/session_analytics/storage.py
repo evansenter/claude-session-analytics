@@ -182,9 +182,7 @@ def migrate_v2(conn):
     """)
     conn.execute("CREATE INDEX IF NOT EXISTS idx_git_commits_timestamp ON git_commits(timestamp)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_git_commits_session ON git_commits(session_id)")
-    conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_git_commits_project ON git_commits(project_path)"
-    )
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_git_commits_project ON git_commits(project_path)")
 
 
 class SQLiteStorage:
