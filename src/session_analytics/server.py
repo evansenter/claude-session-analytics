@@ -217,6 +217,29 @@ def query_sequences(days: int = 7, min_count: int = 3, length: int = 2) -> dict:
 
 
 @mcp.tool()
+def sample_sequences(pattern: str, count: int = 5, context_events: int = 2, days: int = 7) -> dict:
+    """Get random samples of a sequence pattern with surrounding context.
+
+    Instead of just counting "Read → Edit" occurrences, returns actual examples
+    with context for LLM interpretation of workflow patterns.
+
+    Args:
+        pattern: Sequence pattern (e.g., "Read → Edit" or "Read,Edit")
+        count: Number of random samples to return (default: 5)
+        context_events: Number of events before/after to include (default: 2)
+        days: Number of days to analyze (default: 7)
+
+    Returns:
+        Pattern info, total occurrences, and sampled instances with context
+    """
+    queries.ensure_fresh_data(storage, days=days)
+    result = patterns.sample_sequences(
+        storage, pattern=pattern, count=count, context_events=context_events, days=days
+    )
+    return {"status": "ok", **result}
+
+
+@mcp.tool()
 def query_permission_gaps(days: int = 7, threshold: int = 5) -> dict:
     """Find commands that may need to be added to settings.json.
 
@@ -245,18 +268,211 @@ def query_permission_gaps(days: int = 7, threshold: int = 5) -> dict:
 
 
 @mcp.tool()
-def get_insights(refresh: bool = False, days: int = 7) -> dict:
+def get_user_journey(hours: int = 24, include_projects: bool = True, limit: int = 100) -> dict:
+    """Get all user messages chronologically across sessions.
+
+    Shows how the user moved across sessions and projects over time,
+    revealing task switching, project interleaving, and work patterns.
+
+    Args:
+        hours: Number of hours to look back (default: 24)
+        include_projects: Include project info in output (default: True)
+        limit: Maximum messages to return (default: 100)
+
+    Returns:
+        Journey events with timestamps, sessions, and messages
+    """
+    queries.ensure_fresh_data(storage, days=max(1, hours // 24 + 1))
+    result = queries.get_user_journey(
+        storage, hours=hours, include_projects=include_projects, limit=limit
+    )
+    return {"status": "ok", **result}
+
+
+@mcp.tool()
+def detect_parallel_sessions(hours: int = 24, min_overlap_minutes: int = 5) -> dict:
+    """Find sessions that were active simultaneously.
+
+    Identifies when multiple sessions were active at the same time,
+    indicating worktree usage, waiting on CI, or multi-task work.
+
+    Args:
+        hours: Number of hours to look back (default: 24)
+        min_overlap_minutes: Minimum overlap to consider parallel (default: 5)
+
+    Returns:
+        Parallel session periods with timing and session details
+    """
+    queries.ensure_fresh_data(storage, days=max(1, hours // 24 + 1))
+    result = queries.detect_parallel_sessions(
+        storage, hours=hours, min_overlap_minutes=min_overlap_minutes
+    )
+    return {"status": "ok", **result}
+
+
+@mcp.tool()
+def find_related_sessions(
+    session_id: str, method: str = "files", days: int = 7, limit: int = 10
+) -> dict:
+    """Find sessions related to a given session.
+
+    Identifies sessions that share common files, commands, or temporal proximity.
+
+    Args:
+        session_id: The session ID to find related sessions for
+        method: How to find related: 'files', 'commands', or 'temporal' (default: 'files')
+        days: Number of days to search (default: 7)
+        limit: Maximum related sessions to return (default: 10)
+
+    Returns:
+        Related sessions with their connection details
+    """
+    queries.ensure_fresh_data(storage, days=days)
+    result = queries.find_related_sessions(
+        storage, session_id=session_id, method=method, days=days, limit=limit
+    )
+    return {"status": "ok", **result}
+
+
+@mcp.tool()
+def get_insights(refresh: bool = False, days: int = 7, include_advanced: bool = True) -> dict:
     """Get pre-computed patterns for /improve-workflow.
+
+    Includes traditional pattern analysis plus advanced analytics from RFC #17:
+    trends, failure analysis, and session classification summaries.
 
     Args:
         refresh: Force recomputation of patterns (default: False)
         days: Number of days to analyze if refreshing (default: 7)
+        include_advanced: Include trends, failures, classification (default: True)
 
     Returns:
-        Insights organized by type (tool_frequency, sequences, permission_gaps)
+        Insights organized by type with optional advanced analytics
     """
     queries.ensure_fresh_data(storage, days=days)
-    result = patterns.get_insights(storage, refresh=refresh, days=days)
+    result = patterns.get_insights(
+        storage, refresh=refresh, days=days, include_advanced=include_advanced
+    )
+    return {"status": "ok", **result}
+
+
+@mcp.tool()
+def analyze_failures(days: int = 7, rework_window_minutes: int = 10) -> dict:
+    """Analyze failure patterns and recovery behavior.
+
+    Identifies tool errors, rework patterns (same file edited multiple times),
+    and error clustering by tool/command.
+
+    Args:
+        days: Number of days to analyze (default: 7)
+        rework_window_minutes: Time window for detecting rework (default: 10)
+
+    Returns:
+        Failure analysis including error counts, rework patterns, and recovery times
+    """
+    queries.ensure_fresh_data(storage, days=days)
+    result = patterns.analyze_failures(
+        storage, days=days, rework_window_minutes=rework_window_minutes
+    )
+    return {"status": "ok", **result}
+
+
+@mcp.tool()
+def classify_sessions(days: int = 7, project: str | None = None) -> dict:
+    """Classify sessions based on their dominant activity patterns.
+
+    Categories include: debugging (high error rate), development (edit-heavy),
+    research (read/search heavy), maintenance (CI/git heavy), mixed.
+
+    Args:
+        days: Number of days to analyze (default: 7)
+        project: Optional project filter
+
+    Returns:
+        Session classifications with category distribution
+    """
+    queries.ensure_fresh_data(storage, days=days)
+    result = queries.classify_sessions(storage, days=days, project=project)
+    return {"status": "ok", **result}
+
+
+@mcp.tool()
+def get_handoff_context(
+    session_id: str | None = None, hours: int = 4, message_limit: int = 10
+) -> dict:
+    """Get context for session handoff (useful for /status-report).
+
+    Provides recent activity summary including last user messages,
+    files modified, commands run, and session duration/activity stats.
+
+    Args:
+        session_id: Specific session ID (default: most recent session)
+        hours: Hours to look back if no session specified (default: 4)
+        message_limit: Maximum messages to return (default: 10)
+
+    Returns:
+        Handoff context including messages, files, commands, and activity summary
+    """
+    queries.ensure_fresh_data(storage, days=max(1, hours // 24 + 1))
+    result = queries.get_handoff_context(
+        storage, session_id=session_id, hours=hours, message_limit=message_limit
+    )
+    return {"status": "ok", **result}
+
+
+@mcp.tool()
+def analyze_trends(days: int = 7, compare_to: str = "previous") -> dict:
+    """Analyze trends by comparing current period to previous period.
+
+    Compares metrics between two time periods to identify changes in usage patterns.
+
+    Args:
+        days: Length of current period in days (default: 7)
+        compare_to: 'previous' (same length before current) or 'same_last_month' (default: previous)
+
+    Returns:
+        Trend analysis including percentage changes and direction for events, sessions, errors, tokens
+    """
+    queries.ensure_fresh_data(storage, days=days * 2)
+    result = patterns.analyze_trends(storage, days=days, compare_to=compare_to)
+    return {"status": "ok", **result}
+
+
+@mcp.tool()
+def ingest_git_history(
+    repo_path: str | None = None, days: int = 7, project_path: str | None = None
+) -> dict:
+    """Ingest git commit history from a repository.
+
+    Parses git log and stores commits for correlation with session activity.
+
+    Args:
+        repo_path: Path to git repository (default: current directory)
+        days: Number of days of history to ingest (default: 7)
+        project_path: Optional project path to associate commits with
+
+    Returns:
+        Ingestion stats including commits found and added
+    """
+    result = ingest.ingest_git_history(
+        storage, repo_path=repo_path, days=days, project_path=project_path
+    )
+    return {"status": "ok", **result}
+
+
+@mcp.tool()
+def correlate_git_with_sessions(days: int = 7) -> dict:
+    """Correlate git commits with session activity.
+
+    Associates commits with sessions based on timing.
+
+    Args:
+        days: Number of days to correlate (default: 7)
+
+    Returns:
+        Correlation stats including commits correlated
+    """
+    result = ingest.correlate_git_with_sessions(storage, days=days)
     return {"status": "ok", **result}
 
 

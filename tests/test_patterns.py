@@ -14,6 +14,7 @@ from session_analytics.patterns import (
     compute_tool_frequency_patterns,
     get_insights,
     load_allowed_commands,
+    sample_sequences,
 )
 from session_analytics.storage import Event, SQLiteStorage
 
@@ -305,3 +306,786 @@ class TestGetInsights:
         assert "total_tools" in insights["summary"]
         assert "total_commands" in insights["summary"]
         assert "total_sequences" in insights["summary"]
+
+
+class TestSampleSequences:
+    """Tests for the sample_sequences function (Phase 2: N-gram Sampling)."""
+
+    def test_sample_sequences_basic(self, populated_storage):
+        """Test sampling a known sequence pattern."""
+        result = sample_sequences(populated_storage, pattern="Read → Edit", days=7)
+
+        assert result["pattern"] == "Read → Edit"
+        assert result["parsed_tools"] == ["Read", "Edit"]
+        assert result["total_occurrences"] == 3  # 3 Read -> Edit sequences
+        assert result["sample_count"] <= 5  # Default sample size
+
+    def test_sample_sequences_comma_separator(self, populated_storage):
+        """Test that comma separator also works."""
+        result = sample_sequences(populated_storage, pattern="Read,Edit", days=7)
+
+        assert result["parsed_tools"] == ["Read", "Edit"]
+        assert result["total_occurrences"] == 3
+
+    def test_sample_sequences_with_context(self, populated_storage):
+        """Test that context events are included."""
+        result = sample_sequences(
+            populated_storage, pattern="Read → Edit", context_events=1, days=7
+        )
+
+        # Each sample should have events
+        for sample in result["samples"]:
+            assert "events" in sample
+            assert len(sample["events"]) >= 2  # At least the matched pattern
+
+    def test_sample_sequences_limits_count(self, populated_storage):
+        """Test that count parameter limits samples."""
+        result = sample_sequences(populated_storage, pattern="Read → Edit", count=1, days=7)
+
+        assert result["sample_count"] == 1
+
+    def test_sample_sequences_no_match(self, populated_storage):
+        """Test with a pattern that doesn't exist."""
+        result = sample_sequences(populated_storage, pattern="Write → Grep", days=7)
+
+        assert result["total_occurrences"] == 0
+        assert result["sample_count"] == 0
+        assert result["samples"] == []
+
+    def test_sample_sequences_invalid_pattern(self, storage):
+        """Test with an invalid single-tool pattern."""
+        result = sample_sequences(storage, pattern="Read", days=7)
+
+        assert "error" in result
+        assert result["total_occurrences"] == 0
+
+    def test_sample_sequences_includes_file_paths(self, storage):
+        """Test that file paths are included when available."""
+        now = datetime.now()
+
+        events = [
+            Event(
+                id=None,
+                uuid="f1",
+                timestamp=now - timedelta(hours=1),
+                session_id="s1",
+                project_path="-test",
+                entry_type="tool_use",
+                tool_name="Read",
+                file_path="/path/to/file.py",
+            ),
+            Event(
+                id=None,
+                uuid="f2",
+                timestamp=now - timedelta(hours=1, minutes=-1),
+                session_id="s1",
+                project_path="-test",
+                entry_type="tool_use",
+                tool_name="Edit",
+                file_path="/path/to/file.py",
+            ),
+        ]
+        storage.add_events_batch(events)
+
+        result = sample_sequences(storage, pattern="Read → Edit", days=7)
+
+        assert result["total_occurrences"] == 1
+        assert result["sample_count"] == 1
+        sample_events = result["samples"][0]["events"]
+        assert any(e.get("file") == "/path/to/file.py" for e in sample_events)
+
+    def test_sample_sequences_includes_commands(self, storage):
+        """Test that Bash commands are included when available."""
+        now = datetime.now()
+
+        events = [
+            Event(
+                id=None,
+                uuid="c1",
+                timestamp=now - timedelta(hours=1),
+                session_id="s1",
+                project_path="-test",
+                entry_type="tool_use",
+                tool_name="Bash",
+                command="git",
+            ),
+            Event(
+                id=None,
+                uuid="c2",
+                timestamp=now - timedelta(hours=1, minutes=-1),
+                session_id="s1",
+                project_path="-test",
+                entry_type="tool_use",
+                tool_name="Bash",
+                command="make",
+            ),
+        ]
+        storage.add_events_batch(events)
+
+        result = sample_sequences(storage, pattern="Bash → Bash", days=7)
+
+        assert result["total_occurrences"] == 1
+        sample_events = result["samples"][0]["events"]
+        commands = [e.get("command") for e in sample_events if e.get("command")]
+        assert "git" in commands
+        assert "make" in commands
+
+    def test_sample_sequences_marks_match_events(self, populated_storage):
+        """Test that matched events are marked with is_match=True."""
+        result = sample_sequences(
+            populated_storage, pattern="Read → Edit", context_events=1, days=7
+        )
+
+        for sample in result["samples"]:
+            matched_events = [e for e in sample["events"] if e.get("is_match")]
+            # Should have exactly 2 matched events (Read and Edit)
+            assert len(matched_events) == 2
+            tools = [e["tool"] for e in matched_events]
+            assert tools == ["Read", "Edit"]
+
+
+class TestAnalyzeFailures:
+    """Tests for the analyze_failures function (Phase 4: Failure Analysis)."""
+
+    def test_analyze_failures_basic(self, storage):
+        """Test basic failure analysis with errors."""
+        from session_analytics.patterns import analyze_failures
+
+        now = datetime.now()
+        events = [
+            # Tool use followed by error result
+            Event(
+                id=None,
+                uuid="e1",
+                timestamp=now - timedelta(hours=1),
+                session_id="s1",
+                entry_type="tool_use",
+                tool_name="Read",
+                tool_id="t1",
+            ),
+            Event(
+                id=None,
+                uuid="e2",
+                timestamp=now - timedelta(hours=1, minutes=-1),
+                session_id="s1",
+                entry_type="tool_result",
+                tool_id="t1",
+                is_error=True,
+            ),
+        ]
+        storage.add_events_batch(events)
+
+        result = analyze_failures(storage, days=7)
+
+        assert result["total_errors"] == 1
+        assert result["sessions_with_errors"] == 1
+
+    def test_analyze_failures_no_errors(self, storage):
+        """Test when there are no errors."""
+        from session_analytics.patterns import analyze_failures
+
+        now = datetime.now()
+        events = [
+            Event(
+                id=None,
+                uuid="ok1",
+                timestamp=now - timedelta(hours=1),
+                session_id="s1",
+                entry_type="tool_use",
+                tool_name="Read",
+            ),
+        ]
+        storage.add_events_batch(events)
+
+        result = analyze_failures(storage, days=7)
+
+        assert result["total_errors"] == 0
+        assert result["sessions_with_errors"] == 0
+
+    def test_rework_detection(self, storage):
+        """Test detection of rework patterns (multiple edits to same file)."""
+        from session_analytics.patterns import analyze_failures
+
+        now = datetime.now()
+        # 4 edits to the same file within 10 minutes - should be detected as rework
+        events = [
+            Event(
+                id=None,
+                uuid="r1",
+                timestamp=now - timedelta(minutes=10),
+                session_id="s1",
+                entry_type="tool_use",
+                tool_name="Edit",
+                file_path="/path/to/file.py",
+            ),
+            Event(
+                id=None,
+                uuid="r2",
+                timestamp=now - timedelta(minutes=8),
+                session_id="s1",
+                entry_type="tool_use",
+                tool_name="Edit",
+                file_path="/path/to/file.py",
+            ),
+            Event(
+                id=None,
+                uuid="r3",
+                timestamp=now - timedelta(minutes=6),
+                session_id="s1",
+                entry_type="tool_use",
+                tool_name="Edit",
+                file_path="/path/to/file.py",
+            ),
+            Event(
+                id=None,
+                uuid="r4",
+                timestamp=now - timedelta(minutes=4),
+                session_id="s1",
+                entry_type="tool_use",
+                tool_name="Edit",
+                file_path="/path/to/file.py",
+            ),
+        ]
+        storage.add_events_batch(events)
+
+        result = analyze_failures(storage, days=7, rework_window_minutes=15)
+
+        rework = result["rework_patterns"]
+        assert rework["instances_detected"] >= 1
+        assert len(rework["examples"]) >= 1
+        assert rework["examples"][0]["edit_count"] >= 3
+
+    def test_rework_not_detected_different_files(self, storage):
+        """Test that edits to different files aren't counted as rework."""
+        from session_analytics.patterns import analyze_failures
+
+        now = datetime.now()
+        events = [
+            Event(
+                id=None,
+                uuid="d1",
+                timestamp=now - timedelta(minutes=3),
+                session_id="s1",
+                entry_type="tool_use",
+                tool_name="Edit",
+                file_path="/path/to/file1.py",
+            ),
+            Event(
+                id=None,
+                uuid="d2",
+                timestamp=now - timedelta(minutes=2),
+                session_id="s1",
+                entry_type="tool_use",
+                tool_name="Edit",
+                file_path="/path/to/file2.py",
+            ),
+            Event(
+                id=None,
+                uuid="d3",
+                timestamp=now - timedelta(minutes=1),
+                session_id="s1",
+                entry_type="tool_use",
+                tool_name="Edit",
+                file_path="/path/to/file3.py",
+            ),
+        ]
+        storage.add_events_batch(events)
+
+        result = analyze_failures(storage, days=7)
+
+        # Different files shouldn't count as rework
+        assert result["rework_patterns"]["instances_detected"] == 0
+
+
+class TestAnalyzeTrends:
+    """Tests for the analyze_trends function (Phase 7: Trend Analysis)."""
+
+    def test_empty_database(self, storage):
+        """Test with empty database."""
+        from session_analytics.patterns import analyze_trends
+
+        result = analyze_trends(storage, days=7)
+
+        assert result["days"] == 7
+        assert result["compare_to"] == "previous"
+        assert "current_period" in result
+        assert "previous_period" in result
+        assert "metrics" in result
+        assert result["metrics"]["events"]["current"] == 0
+        assert result["metrics"]["events"]["previous"] == 0
+
+    def test_trend_metrics(self, storage):
+        """Test that trends are calculated correctly."""
+        from session_analytics.patterns import analyze_trends
+
+        now = datetime.now()
+
+        # Add events in current period
+        current_events = [
+            Event(
+                id=None,
+                uuid=f"c{i}",
+                timestamp=now - timedelta(days=2),
+                session_id="current-session",
+                entry_type="tool_use",
+                tool_name="Read",
+            )
+            for i in range(10)
+        ]
+
+        # Add events in previous period
+        previous_events = [
+            Event(
+                id=None,
+                uuid=f"p{i}",
+                timestamp=now - timedelta(days=10),
+                session_id="previous-session",
+                entry_type="tool_use",
+                tool_name="Read",
+            )
+            for i in range(5)
+        ]
+
+        storage.add_events_batch(current_events + previous_events)
+
+        result = analyze_trends(storage, days=7)
+
+        # Current period should have 10 events, previous should have 5
+        assert result["metrics"]["events"]["current"] == 10
+        assert result["metrics"]["events"]["previous"] == 5
+        assert result["metrics"]["events"]["direction"] == "up"
+        assert result["metrics"]["events"]["change_pct"] == 100.0
+
+    def test_tool_changes_included(self, storage):
+        """Test that tool-specific changes are included."""
+        from session_analytics.patterns import analyze_trends
+
+        now = datetime.now()
+
+        events = [
+            Event(
+                id=None,
+                uuid="t1",
+                timestamp=now - timedelta(days=2),
+                session_id="s1",
+                entry_type="tool_use",
+                tool_name="Edit",
+            ),
+            Event(
+                id=None,
+                uuid="t2",
+                timestamp=now - timedelta(days=10),
+                session_id="s2",
+                entry_type="tool_use",
+                tool_name="Read",
+            ),
+        ]
+        storage.add_events_batch(events)
+
+        result = analyze_trends(storage, days=7)
+
+        assert "tool_changes" in result
+        assert len(result["tool_changes"]) >= 1
+
+    def test_compare_to_previous(self, storage):
+        """Test compare_to='previous' mode."""
+        from session_analytics.patterns import analyze_trends
+
+        result = analyze_trends(storage, days=7, compare_to="previous")
+
+        assert result["compare_to"] == "previous"
+
+    def test_compare_to_same_last_month(self, storage):
+        """Test compare_to='same_last_month' mode compares to same week last month."""
+        from session_analytics.patterns import analyze_trends
+
+        now = datetime.now()
+
+        # Add events in current week
+        current_events = [
+            Event(
+                id=None,
+                uuid=f"slm-c{i}",
+                timestamp=now - timedelta(days=2),
+                session_id="current-session",
+                entry_type="tool_use",
+                tool_name="Read",
+            )
+            for i in range(10)
+        ]
+
+        # Add events in same week last month (~28 days ago)
+        last_month_events = [
+            Event(
+                id=None,
+                uuid=f"slm-p{i}",
+                timestamp=now - timedelta(days=30),
+                session_id="last-month-session",
+                entry_type="tool_use",
+                tool_name="Read",
+            )
+            for i in range(8)
+        ]
+
+        storage.add_events_batch(current_events + last_month_events)
+
+        result = analyze_trends(storage, days=7, compare_to="same_last_month")
+
+        assert result["compare_to"] == "same_last_month"
+        # Should compare current 7 days to 7 days starting ~28 days ago
+        assert result["metrics"]["events"]["current"] == 10
+        assert result["metrics"]["events"]["previous"] == 8
+        assert result["metrics"]["events"]["direction"] == "up"
+
+    def test_trend_unchanged_threshold(self, storage):
+        """Test that changes within +/- 5% are marked as 'unchanged'."""
+        from session_analytics.patterns import analyze_trends
+
+        now = datetime.now()
+
+        # Add 100 events in current period
+        current_events = [
+            Event(
+                id=None,
+                uuid=f"unch-c{i}",
+                timestamp=now - timedelta(days=2),
+                session_id="current-session",
+                entry_type="tool_use",
+                tool_name="Read",
+            )
+            for i in range(100)
+        ]
+
+        # Add 98 events in previous period (2% less - should be unchanged)
+        previous_events = [
+            Event(
+                id=None,
+                uuid=f"unch-p{i}",
+                timestamp=now - timedelta(days=10),
+                session_id="previous-session",
+                entry_type="tool_use",
+                tool_name="Read",
+            )
+            for i in range(98)
+        ]
+
+        storage.add_events_batch(current_events + previous_events)
+
+        result = analyze_trends(storage, days=7)
+
+        # 2% change should be marked as unchanged
+        assert result["metrics"]["events"]["direction"] == "unchanged"
+
+
+class TestSampleSequencesThreeToolPattern:
+    """Tests for sample_sequences with 3-tool patterns."""
+
+    def test_sample_sequences_three_tool_pattern(self, storage):
+        """Test sampling 3-tool patterns like Read -> Edit -> Bash."""
+        now = datetime.now()
+
+        # Create events with 3-tool pattern
+        events = [
+            Event(
+                id=None,
+                uuid="3t-1",
+                timestamp=now - timedelta(hours=1),
+                session_id="s1",
+                project_path="-test",
+                entry_type="tool_use",
+                tool_name="Read",
+                file_path="/file.py",
+            ),
+            Event(
+                id=None,
+                uuid="3t-2",
+                timestamp=now - timedelta(hours=1, minutes=-1),
+                session_id="s1",
+                project_path="-test",
+                entry_type="tool_use",
+                tool_name="Edit",
+                file_path="/file.py",
+            ),
+            Event(
+                id=None,
+                uuid="3t-3",
+                timestamp=now - timedelta(hours=1, minutes=-2),
+                session_id="s1",
+                project_path="-test",
+                entry_type="tool_use",
+                tool_name="Bash",
+                command="make",
+            ),
+        ]
+        storage.add_events_batch(events)
+
+        result = sample_sequences(storage, pattern="Read → Edit → Bash", days=7)
+
+        assert result["pattern"] == "Read → Edit → Bash"
+        assert result["parsed_tools"] == ["Read", "Edit", "Bash"]
+        assert result["total_occurrences"] == 1
+        assert result["sample_count"] == 1
+
+        # Check that all 3 tools are matched
+        matched = [e for e in result["samples"][0]["events"] if e.get("is_match")]
+        assert len(matched) == 3
+
+    def test_sample_sequences_across_multiple_sessions(self, storage):
+        """Test that patterns found in different sessions are all counted."""
+        now = datetime.now()
+
+        events = []
+        # Create the same 3-tool pattern in 3 different sessions
+        for i, session in enumerate(["sess-a", "sess-b", "sess-c"]):
+            events.extend(
+                [
+                    Event(
+                        id=None,
+                        uuid=f"multi-{session}-1",
+                        timestamp=now - timedelta(hours=i + 1),
+                        session_id=session,
+                        project_path="-test",
+                        entry_type="tool_use",
+                        tool_name="Grep",
+                    ),
+                    Event(
+                        id=None,
+                        uuid=f"multi-{session}-2",
+                        timestamp=now - timedelta(hours=i + 1, minutes=-1),
+                        session_id=session,
+                        project_path="-test",
+                        entry_type="tool_use",
+                        tool_name="Read",
+                    ),
+                    Event(
+                        id=None,
+                        uuid=f"multi-{session}-3",
+                        timestamp=now - timedelta(hours=i + 1, minutes=-2),
+                        session_id=session,
+                        project_path="-test",
+                        entry_type="tool_use",
+                        tool_name="Edit",
+                    ),
+                ]
+            )
+        storage.add_events_batch(events)
+
+        result = sample_sequences(storage, pattern="Grep → Read → Edit", days=7)
+
+        assert result["total_occurrences"] == 3
+        assert result["sample_count"] == 3  # All 3 since count=5 default
+
+
+class TestAnalyzeFailuresJoinLogic:
+    """Tests for analyze_failures errors_by_tool join logic."""
+
+    def test_errors_by_tool_join(self, storage):
+        """Test that errors are properly joined to their tool_use events."""
+        from session_analytics.patterns import analyze_failures
+
+        now = datetime.now()
+        events = [
+            # Read tool use with error result
+            Event(
+                id=None,
+                uuid="join-use-1",
+                timestamp=now - timedelta(hours=1),
+                session_id="s1",
+                entry_type="tool_use",
+                tool_name="Read",
+                tool_id="tool-read-1",
+            ),
+            Event(
+                id=None,
+                uuid="join-result-1",
+                timestamp=now - timedelta(hours=1, minutes=-1),
+                session_id="s1",
+                entry_type="tool_result",
+                tool_id="tool-read-1",
+                is_error=True,
+            ),
+            # Bash tool use with error result
+            Event(
+                id=None,
+                uuid="join-use-2",
+                timestamp=now - timedelta(hours=2),
+                session_id="s1",
+                entry_type="tool_use",
+                tool_name="Bash",
+                tool_id="tool-bash-1",
+                command="make",
+            ),
+            Event(
+                id=None,
+                uuid="join-result-2",
+                timestamp=now - timedelta(hours=2, minutes=-1),
+                session_id="s1",
+                entry_type="tool_result",
+                tool_id="tool-bash-1",
+                is_error=True,
+            ),
+        ]
+        storage.add_events_batch(events)
+
+        result = analyze_failures(storage, days=7)
+
+        assert result["total_errors"] == 2
+        # Check errors_by_tool has both tools
+        tool_errors = {e["tool"]: e["errors"] for e in result["errors_by_tool"]}
+        assert "Read" in tool_errors
+        assert "Bash" in tool_errors
+        assert tool_errors["Read"] == 1
+        assert tool_errors["Bash"] == 1
+
+    def test_errors_without_tool_id_not_in_errors_by_tool(self, storage):
+        """Test that errors without tool_id are in total but not in errors_by_tool."""
+        from session_analytics.patterns import analyze_failures
+
+        now = datetime.now()
+        events = [
+            # Error result without tool_id
+            Event(
+                id=None,
+                uuid="orphan-error",
+                timestamp=now - timedelta(hours=1),
+                session_id="s1",
+                entry_type="tool_result",
+                tool_id=None,
+                is_error=True,
+            ),
+        ]
+        storage.add_events_batch(events)
+
+        result = analyze_failures(storage, days=7)
+
+        assert result["total_errors"] == 1
+        # Without tool_id, can't join to tool_use, so errors_by_tool should be empty
+        assert len(result["errors_by_tool"]) == 0
+
+    def test_rework_not_detected_across_sessions(self, storage):
+        """Test that same file edits in different sessions aren't counted as rework."""
+        from session_analytics.patterns import analyze_failures
+
+        now = datetime.now()
+        events = [
+            # Same file edited in session 1
+            Event(
+                id=None,
+                uuid="cross-s1-1",
+                timestamp=now - timedelta(hours=1),
+                session_id="session-1",
+                entry_type="tool_use",
+                tool_name="Edit",
+                file_path="/same/file.py",
+            ),
+            Event(
+                id=None,
+                uuid="cross-s1-2",
+                timestamp=now - timedelta(hours=1, minutes=-1),
+                session_id="session-1",
+                entry_type="tool_use",
+                tool_name="Edit",
+                file_path="/same/file.py",
+            ),
+            # Same file edited in session 2 (should NOT count as rework with session 1)
+            Event(
+                id=None,
+                uuid="cross-s2-1",
+                timestamp=now - timedelta(hours=2),
+                session_id="session-2",
+                entry_type="tool_use",
+                tool_name="Edit",
+                file_path="/same/file.py",
+            ),
+            Event(
+                id=None,
+                uuid="cross-s2-2",
+                timestamp=now - timedelta(hours=2, minutes=-1),
+                session_id="session-2",
+                entry_type="tool_use",
+                tool_name="Edit",
+                file_path="/same/file.py",
+            ),
+        ]
+        storage.add_events_batch(events)
+
+        result = analyze_failures(storage, days=7)
+
+        # Neither session has 3+ edits, so no rework should be detected
+        assert result["rework_patterns"]["instances_detected"] == 0
+
+
+class TestGetInsightsIntegration:
+    """Tests for get_insights integration with advanced analytics."""
+
+    def test_insights_with_advanced_analytics(self, storage):
+        """Test that advanced analytics are included when include_advanced=True."""
+        now = datetime.now()
+
+        # Add enough events to have data for all analytics
+        events = []
+        for i in range(10):
+            events.append(
+                Event(
+                    id=None,
+                    uuid=f"adv-{i}",
+                    timestamp=now - timedelta(hours=i),
+                    session_id="test-session",
+                    project_path="/test/project",
+                    entry_type="tool_use",
+                    tool_name="Edit" if i % 2 == 0 else "Read",
+                    file_path=f"/file{i}.py",
+                )
+            )
+        storage.add_events_batch(events)
+
+        insights = get_insights(storage, refresh=True, days=7, include_advanced=True)
+
+        assert "summary" in insights
+        # These should be present (may be True or False depending on data)
+        assert "has_trends" in insights["summary"]
+        assert "has_failure_analysis" in insights["summary"]
+        assert "has_classification" in insights["summary"]
+
+    def test_insights_without_advanced_analytics(self, storage):
+        """Test that advanced analytics are excluded when include_advanced=False."""
+        now = datetime.now()
+
+        events = [
+            Event(
+                id=None,
+                uuid="basic-1",
+                timestamp=now - timedelta(hours=1),
+                session_id="s1",
+                entry_type="tool_use",
+                tool_name="Read",
+            ),
+        ]
+        storage.add_events_batch(events)
+
+        insights = get_insights(storage, refresh=True, days=7, include_advanced=False)
+
+        # These keys should not be present when include_advanced=False
+        assert "has_trends" not in insights["summary"]
+        assert "has_failure_analysis" not in insights["summary"]
+        assert "has_classification" not in insights["summary"]
+        assert "trends" not in insights
+        assert "failure_summary" not in insights
+        assert "session_types" not in insights
+
+    def test_insights_graceful_degradation(self, storage):
+        """Test that insights work even when advanced analytics fail."""
+        # Empty storage should still return basic insights
+        insights = get_insights(storage, refresh=True, days=7, include_advanced=True)
+
+        # Basic structure should still exist
+        assert "tool_frequency" in insights
+        assert "command_frequency" in insights
+        assert "sequences" in insights
+        assert "permission_gaps" in insights
+        assert "summary" in insights
+
+        # Advanced flags should be present (possibly False if failed)
+        assert "has_trends" in insights["summary"]
+        assert "has_failure_analysis" in insights["summary"]
+        assert "has_classification" in insights["summary"]

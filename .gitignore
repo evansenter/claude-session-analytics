@@ -39,3 +39,4 @@ htmlcov/
 # Project-specific
 *.db
 .claude/
+.parallel-context.md

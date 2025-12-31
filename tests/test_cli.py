@@ -266,6 +266,7 @@ class TestCliCommands:
             json = False
             days = 7
             refresh = True
+            basic = False
 
         with patch("session_analytics.cli.SQLiteStorage", return_value=populated_storage):
             cmd_insights(Args())

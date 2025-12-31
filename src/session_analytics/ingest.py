@@ -5,7 +5,7 @@ import logging
 from datetime import datetime, timedelta
 from pathlib import Path
 
-from session_analytics.storage import Event, IngestionState, Session, SQLiteStorage
+from session_analytics.storage import Event, GitCommit, IngestionState, Session, SQLiteStorage
 
 logger = logging.getLogger("session-analytics")
 
@@ -470,4 +470,224 @@ def ingest_logs(
         "events_added": total_events,
         "sessions_updated": sessions_updated,
         "errors": total_errors,
+    }
+
+
+def ingest_git_history(
+    storage: SQLiteStorage,
+    repo_path: Path | str | None = None,
+    days: int = 7,
+    project_path: str | None = None,
+) -> dict:
+    """Ingest git commit history from a repository.
+
+    Parses git log output and stores commits in the database for correlation
+    with session activity.
+
+    Args:
+        storage: Storage instance
+        repo_path: Path to git repository (default: current directory)
+        days: Number of days of history to ingest (default: 7)
+        project_path: Optional project path to associate commits with
+
+    Returns:
+        Dict with ingestion stats
+    """
+    import subprocess
+
+    if repo_path is None:
+        repo_path = Path.cwd()
+    else:
+        repo_path = Path(repo_path)
+
+    if not (repo_path / ".git").is_dir():
+        return {
+            "error": f"Not a git repository: {repo_path}",
+            "commits_added": 0,
+        }
+
+    # Get commits from the last N days
+    since_date = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
+
+    try:
+        # Git log format: hash|author|date|subject
+        result = subprocess.run(
+            [
+                "git",
+                "log",
+                f"--since={since_date}",
+                "--format=%H|%an|%aI|%s",
+                "--all",
+            ],
+            cwd=repo_path,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+
+        if result.returncode != 0:
+            return {
+                "error": f"git log failed: {result.stderr}",
+                "commits_added": 0,
+            }
+
+        commits = []
+        skipped_malformed = 0
+        skipped_date_parse = 0
+
+        for line in result.stdout.strip().split("\n"):
+            if not line:
+                continue
+
+            parts = line.split("|", 3)
+            if len(parts) < 4:
+                skipped_malformed += 1
+                logger.debug("Skipping malformed git log line: %s", line[:100])
+                continue
+
+            sha, author, date_str, message = parts
+
+            try:
+                timestamp = datetime.fromisoformat(date_str)
+            except ValueError:
+                skipped_date_parse += 1
+                logger.debug("Failed to parse date '%s' for commit %s", date_str, sha[:8])
+                continue
+
+            commits.append(
+                GitCommit(
+                    sha=sha,
+                    message=f"[{author}] {message[:480]}",  # Include author in message
+                    timestamp=timestamp,
+                    project_path=project_path or str(repo_path),
+                    session_id=None,  # Will be correlated later
+                )
+            )
+
+        # Store commits
+        added = storage.add_git_commits_batch(commits)
+        total_lines = len(commits) + skipped_malformed + skipped_date_parse
+
+        return {
+            "repo_path": str(repo_path),
+            "days": days,
+            "commits_found": total_lines,
+            "commits_parsed": len(commits),
+            "commits_added": added,
+            "skipped_malformed": skipped_malformed,
+            "skipped_date_parse": skipped_date_parse,
+        }
+
+    except subprocess.TimeoutExpired:
+        return {
+            "error": "git log timed out",
+            "commits_added": 0,
+        }
+    except FileNotFoundError:
+        return {
+            "error": "git command not found",
+            "commits_added": 0,
+        }
+
+
+def correlate_git_with_sessions(
+    storage: SQLiteStorage,
+    days: int = 7,
+) -> dict:
+    """Correlate git commits with session activity.
+
+    Associates commits with sessions based on timing - if a commit was made
+    during an active session, it's likely related to that session's work.
+
+    Args:
+        storage: Storage instance
+        days: Number of days to correlate (default: 7)
+
+    Returns:
+        Dict with correlation stats
+    """
+    cutoff = datetime.now() - timedelta(days=days)
+
+    # Get session time ranges
+    sessions = storage.execute_query(
+        """
+        SELECT session_id, project_path,
+               MIN(timestamp) as start_time,
+               MAX(timestamp) as end_time
+        FROM events
+        WHERE timestamp >= ?
+        GROUP BY session_id
+        """,
+        (cutoff,),
+    )
+
+    # Build session lookup by time range
+    session_ranges = []
+    for s in sessions:
+        start = s["start_time"]
+        end = s["end_time"]
+        if isinstance(start, str):
+            start = datetime.fromisoformat(start)
+        if isinstance(end, str):
+            end = datetime.fromisoformat(end)
+        session_ranges.append(
+            {
+                "session_id": s["session_id"],
+                "project_path": s["project_path"],
+                "start": start,
+                "end": end,
+            }
+        )
+
+    # Get commits and filter to uncorrelated ones
+    all_commits = storage.get_git_commits(start=cutoff)
+    commits = [c for c in all_commits if c.session_id is None]
+
+    # Buffer of 5 minutes before session start and after session end
+    # Commits just before starting a session are often related preparatory work
+    buffer = timedelta(minutes=5)
+
+    # Collect correlations for batch update
+    correlations: list[tuple[str, str]] = []  # (session_id, sha)
+
+    for commit in commits:
+        commit_time = commit.timestamp
+        if isinstance(commit_time, str):
+            commit_time = datetime.fromisoformat(commit_time)
+
+        # Find matching session (commit within session window ± 5 min buffer)
+        for sr in session_ranges:
+            if (sr["start"] - buffer) <= commit_time <= (sr["end"] + buffer):
+                correlations.append((sr["session_id"], commit.sha))
+                break
+
+    # Batch update all correlations
+    correlated_count = 0
+    correlation_errors = 0
+
+    if correlations:
+        try:
+            storage.executemany(
+                """
+                UPDATE git_commits
+                SET session_id = ?
+                WHERE sha = ?
+                """,
+                correlations,
+            )
+            correlated_count = len(correlations)
+        except Exception as e:
+            logger.error(
+                "Failed to batch correlate %d commits: %s",
+                len(correlations),
+                e,
+            )
+            correlation_errors = len(correlations)
+
+    return {
+        "days": days,
+        "sessions_analyzed": len(session_ranges),
+        "commits_checked": len(commits),
+        "commits_correlated": correlated_count,
+        "correlation_errors": correlation_errors,
     }

@@ -368,3 +368,468 @@ class TestIngestLogs:
         # Update session stats
         sessions = update_session_stats(storage)
         assert sessions >= 1
+
+
+class TestIngestGitHistory:
+    """Tests for git history ingestion."""
+
+    def test_not_a_git_repo(self, storage):
+        """Test with non-git directory."""
+        from session_analytics.ingest import ingest_git_history
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            result = ingest_git_history(storage, repo_path=tmpdir)
+
+            assert "error" in result
+            assert "Not a git repository" in result["error"]
+            assert result["commits_added"] == 0
+
+    def test_git_ingest_returns_stats(self, storage):
+        """Test that git ingest returns proper stats structure."""
+        from session_analytics.ingest import ingest_git_history
+
+        # Using current directory which is a git repo
+        result = ingest_git_history(storage, days=1)
+
+        # Should have proper structure even if no recent commits
+        assert "commits_found" in result or "error" in result
+        if "commits_found" in result:
+            assert "commits_added" in result
+
+    def test_git_ingest_handles_malformed_output(self, storage):
+        """Test that malformed git log lines are skipped and counted."""
+        import tempfile
+        from pathlib import Path
+        from unittest.mock import MagicMock, patch
+
+        from session_analytics.ingest import ingest_git_history
+
+        # Create a fake git directory
+        with tempfile.TemporaryDirectory() as tmpdir:
+            git_dir = Path(tmpdir) / ".git"
+            git_dir.mkdir()
+
+            # Mock subprocess to return malformed output
+            mock_result = MagicMock()
+            mock_result.returncode = 0
+            mock_result.stdout = "\n".join(
+                [
+                    # Valid line (40 hex chars)
+                    "abc123def456789012345678901234567890abcd|Author|2025-01-15T10:00:00|Valid commit",
+                    # Missing fields (only 2 parts instead of 4)
+                    "def456|Author",
+                    # Empty line (should be skipped gracefully)
+                    "",
+                    # Missing message (only 3 parts)
+                    "1234567890abcdef1234567890abcdef12345678|Author|2025-01-15T11:00:00",
+                    # Invalid date format
+                    "fedcba0987654321fedcba0987654321fedcba09|Author|not-a-date|Bad date commit",
+                    # Another valid line (40 hex chars)
+                    "0123456789abcdef0123456789abcdef01234567|Author|2025-01-15T12:00:00|Another valid",
+                ]
+            )
+
+            with patch("subprocess.run", return_value=mock_result):
+                result = ingest_git_history(storage, repo_path=tmpdir, days=7)
+
+            # Should report skipped entries
+            assert result.get("skipped_malformed", 0) >= 2  # "def456|Author" and 3-part line
+            assert result.get("skipped_date_parse", 0) >= 1  # "not-a-date"
+            # Should still process valid commits (commits_parsed is successful parses)
+            assert result.get("commits_parsed", 0) == 2  # Two valid commits parsed
+            assert result.get("commits_added", 0) == 2  # Both added to storage
+
+
+class TestCorrelateGitWithSessions:
+    """Tests for git-session correlation."""
+
+    def test_empty_database(self, storage):
+        """Test with empty database."""
+        from session_analytics.ingest import correlate_git_with_sessions
+
+        result = correlate_git_with_sessions(storage, days=7)
+
+        assert result["days"] == 7
+        assert result["sessions_analyzed"] == 0
+        assert result["commits_checked"] == 0
+        assert result["commits_correlated"] == 0
+
+    def test_correlation_with_matching_session(self, storage):
+        """Test that commits during sessions are correlated."""
+        from datetime import datetime, timedelta
+
+        from session_analytics.ingest import correlate_git_with_sessions
+        from session_analytics.storage import Event, GitCommit
+
+        now = datetime.now()
+
+        # Add a session event
+        events = [
+            Event(
+                id=None,
+                uuid="e1",
+                timestamp=now - timedelta(hours=1),
+                session_id="test-session",
+                project_path="/test/repo",
+                entry_type="tool_use",
+                tool_name="Edit",
+            ),
+            Event(
+                id=None,
+                uuid="e2",
+                timestamp=now - timedelta(minutes=30),
+                session_id="test-session",
+                project_path="/test/repo",
+                entry_type="tool_use",
+                tool_name="Read",
+            ),
+        ]
+        storage.add_events_batch(events)
+
+        # Add a git commit during the session (no session_id yet)
+        commit = GitCommit(
+            sha="abc123def456789012345678901234567890abcd",
+            message="Test commit",
+            timestamp=now - timedelta(minutes=45),
+            project_path="/test/repo",
+            session_id=None,
+        )
+        storage.add_git_commit(commit)
+
+        # Run correlation
+        result = correlate_git_with_sessions(storage, days=7)
+
+        assert result["sessions_analyzed"] == 1
+        assert result["commits_checked"] == 1
+        assert result["commits_correlated"] == 1
+
+        # Verify commit was updated with session ID
+        commits = storage.get_git_commits()
+        assert len(commits) == 1
+        assert commits[0].session_id == "test-session"
+
+    def test_commit_at_session_boundary(self, storage):
+        """Test commit exactly 5 minutes after session end is included."""
+        from datetime import datetime, timedelta
+
+        from session_analytics.ingest import correlate_git_with_sessions
+        from session_analytics.storage import Event, GitCommit
+
+        now = datetime.now()
+        session_end = now - timedelta(minutes=30)
+
+        # Session event
+        storage.add_events_batch(
+            [
+                Event(
+                    id=None,
+                    uuid="boundary-e1",
+                    timestamp=session_end - timedelta(minutes=30),
+                    session_id="boundary-session",
+                    project_path="/test/repo",
+                    entry_type="tool_use",
+                    tool_name="Edit",
+                ),
+                Event(
+                    id=None,
+                    uuid="boundary-e2",
+                    timestamp=session_end,
+                    session_id="boundary-session",
+                    project_path="/test/repo",
+                    entry_type="tool_use",
+                    tool_name="Read",
+                ),
+            ]
+        )
+
+        # Commit exactly 5 minutes after session end (should be included)
+        commit = GitCommit(
+            sha="a" * 40,  # 40 hex characters
+            message="Boundary test commit",
+            timestamp=session_end + timedelta(minutes=5),
+            project_path="/test/repo",
+            session_id=None,
+        )
+        storage.add_git_commit(commit)
+
+        result = correlate_git_with_sessions(storage, days=7)
+
+        assert result["commits_correlated"] == 1
+
+    def test_commit_just_outside_buffer(self, storage):
+        """Test commit 6 minutes after session end is NOT included."""
+        from datetime import datetime, timedelta
+
+        from session_analytics.ingest import correlate_git_with_sessions
+        from session_analytics.storage import Event, GitCommit
+
+        now = datetime.now()
+        session_end = now - timedelta(minutes=30)
+
+        # Session event
+        storage.add_events_batch(
+            [
+                Event(
+                    id=None,
+                    uuid="outside-e1",
+                    timestamp=session_end - timedelta(minutes=30),
+                    session_id="outside-session",
+                    project_path="/test/repo",
+                    entry_type="tool_use",
+                    tool_name="Edit",
+                ),
+                Event(
+                    id=None,
+                    uuid="outside-e2",
+                    timestamp=session_end,
+                    session_id="outside-session",
+                    project_path="/test/repo",
+                    entry_type="tool_use",
+                    tool_name="Read",
+                ),
+            ]
+        )
+
+        # Commit 6 minutes after session end (should NOT be included)
+        commit = GitCommit(
+            sha="b" * 40,  # 40 hex characters
+            message="Outside buffer test commit",
+            timestamp=session_end + timedelta(minutes=6),
+            project_path="/test/repo",
+            session_id=None,
+        )
+        storage.add_git_commit(commit)
+
+        result = correlate_git_with_sessions(storage, days=7)
+
+        assert result["commits_correlated"] == 0
+
+    def test_overlapping_sessions_picks_first_match(self, storage):
+        """Test behavior when commit falls within multiple session windows."""
+        from datetime import datetime, timedelta
+
+        from session_analytics.ingest import correlate_git_with_sessions
+        from session_analytics.storage import Event, GitCommit
+
+        now = datetime.now()
+
+        # Two overlapping sessions
+        events = [
+            # Session 1: starts at -2h, ends at -30min
+            Event(
+                id=None,
+                uuid="overlap-s1-e1",
+                timestamp=now - timedelta(hours=2),
+                session_id="session-first",
+                project_path="/test/repo",
+                entry_type="tool_use",
+                tool_name="Read",
+            ),
+            Event(
+                id=None,
+                uuid="overlap-s1-e2",
+                timestamp=now - timedelta(minutes=30),
+                session_id="session-first",
+                project_path="/test/repo",
+                entry_type="tool_use",
+                tool_name="Edit",
+            ),
+            # Session 2: starts at -1h, ends at -20min
+            Event(
+                id=None,
+                uuid="overlap-s2-e1",
+                timestamp=now - timedelta(hours=1),
+                session_id="session-second",
+                project_path="/test/repo",
+                entry_type="tool_use",
+                tool_name="Read",
+            ),
+            Event(
+                id=None,
+                uuid="overlap-s2-e2",
+                timestamp=now - timedelta(minutes=20),
+                session_id="session-second",
+                project_path="/test/repo",
+                entry_type="tool_use",
+                tool_name="Edit",
+            ),
+        ]
+        storage.add_events_batch(events)
+
+        # Commit during overlap period (45 min ago - in both sessions)
+        commit = GitCommit(
+            sha="c" * 40,  # 40 hex characters
+            message="Overlap test commit",
+            timestamp=now - timedelta(minutes=45),
+            project_path="/test/repo",
+            session_id=None,
+        )
+        storage.add_git_commit(commit)
+
+        result = correlate_git_with_sessions(storage, days=7)
+
+        # Should correlate (deterministic - picks first matching session)
+        assert result["commits_correlated"] == 1
+        commits = storage.get_git_commits()
+        assert commits[0].session_id is not None
+
+    def test_commit_before_session_start_within_buffer(self, storage):
+        """Test commit 5 minutes BEFORE session start IS included (pre-session buffer)."""
+        from datetime import datetime, timedelta
+
+        from session_analytics.ingest import correlate_git_with_sessions
+        from session_analytics.storage import Event, GitCommit
+
+        now = datetime.now()
+        session_start = now - timedelta(hours=1)
+        session_end = now - timedelta(minutes=30)
+
+        # Session events
+        storage.add_events_batch(
+            [
+                Event(
+                    id=None,
+                    uuid="presession-e1",
+                    timestamp=session_start,
+                    session_id="presession-session",
+                    project_path="/test/repo",
+                    entry_type="tool_use",
+                    tool_name="Read",
+                ),
+                Event(
+                    id=None,
+                    uuid="presession-e2",
+                    timestamp=session_end,
+                    session_id="presession-session",
+                    project_path="/test/repo",
+                    entry_type="tool_use",
+                    tool_name="Edit",
+                ),
+            ]
+        )
+
+        # Commit 3 minutes BEFORE session start (should be included with pre-buffer)
+        commit = GitCommit(
+            sha="d" * 40,
+            message="Pre-session commit",
+            timestamp=session_start - timedelta(minutes=3),
+            project_path="/test/repo",
+            session_id=None,
+        )
+        storage.add_git_commit(commit)
+
+        result = correlate_git_with_sessions(storage, days=7)
+
+        assert result["commits_correlated"] == 1
+        commits = storage.get_git_commits()
+        assert commits[0].session_id == "presession-session"
+
+    def test_commit_before_session_outside_pre_buffer(self, storage):
+        """Test commit 6 minutes BEFORE session start is NOT included."""
+        from datetime import datetime, timedelta
+
+        from session_analytics.ingest import correlate_git_with_sessions
+        from session_analytics.storage import Event, GitCommit
+
+        now = datetime.now()
+        session_start = now - timedelta(hours=1)
+        session_end = now - timedelta(minutes=30)
+
+        # Session events
+        storage.add_events_batch(
+            [
+                Event(
+                    id=None,
+                    uuid="preoutside-e1",
+                    timestamp=session_start,
+                    session_id="preoutside-session",
+                    project_path="/test/repo",
+                    entry_type="tool_use",
+                    tool_name="Read",
+                ),
+                Event(
+                    id=None,
+                    uuid="preoutside-e2",
+                    timestamp=session_end,
+                    session_id="preoutside-session",
+                    project_path="/test/repo",
+                    entry_type="tool_use",
+                    tool_name="Edit",
+                ),
+            ]
+        )
+
+        # Commit 6 minutes BEFORE session start (outside 5-min buffer)
+        commit = GitCommit(
+            sha="e" * 40,
+            message="Too early commit",
+            timestamp=session_start - timedelta(minutes=6),
+            project_path="/test/repo",
+            session_id=None,
+        )
+        storage.add_git_commit(commit)
+
+        result = correlate_git_with_sessions(storage, days=7)
+
+        assert result["commits_correlated"] == 0
+
+
+class TestBatchCorrelationErrorHandling:
+    """Tests for batch correlation error handling."""
+
+    def test_batch_correlation_error_logged(self, storage, caplog):
+        """Test that batch correlation errors are logged."""
+        from datetime import datetime, timedelta
+        from unittest.mock import patch
+
+        from session_analytics.ingest import correlate_git_with_sessions
+        from session_analytics.storage import Event, GitCommit
+
+        now = datetime.now()
+        session_start = now - timedelta(hours=1)
+        session_end = now - timedelta(minutes=30)
+
+        # Session events (need 2+ to define a session range)
+        storage.add_events_batch(
+            [
+                Event(
+                    id=None,
+                    uuid="batcherr-e1",
+                    timestamp=session_start,
+                    session_id="batcherr-session",
+                    project_path="/test/repo",
+                    entry_type="tool_use",
+                    tool_name="Read",
+                ),
+                Event(
+                    id=None,
+                    uuid="batcherr-e2",
+                    timestamp=session_end,
+                    session_id="batcherr-session",
+                    project_path="/test/repo",
+                    entry_type="tool_use",
+                    tool_name="Edit",
+                ),
+            ]
+        )
+
+        # Commit during session (should correlate)
+        commit = GitCommit(
+            sha="f" * 40,
+            message="Batch error test",
+            timestamp=session_start + timedelta(minutes=15),
+            project_path="/test/repo",
+            session_id=None,
+        )
+        storage.add_git_commit(commit)
+
+        # Mock executemany to raise an error
+        with patch.object(storage, "executemany", side_effect=Exception("DB write failed")):
+            import logging
+
+            with caplog.at_level(logging.ERROR):
+                result = correlate_git_with_sessions(storage, days=7)
+
+        assert result["correlation_errors"] == 1
+        assert result["commits_correlated"] == 0
+        assert "Failed to batch correlate" in caplog.text

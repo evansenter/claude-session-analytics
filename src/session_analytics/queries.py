@@ -5,6 +5,18 @@ from datetime import datetime, timedelta
 from session_analytics.storage import SQLiteStorage
 
 
+def _format_timestamp(ts) -> str | None:
+    """Format a timestamp value for output.
+
+    Handles both datetime objects and strings from SQLite.
+    """
+    if ts is None:
+        return None
+    if isinstance(ts, str):
+        return ts  # Already a string
+    return ts.isoformat()
+
+
 def build_where_clause(
     cutoff: datetime | None = None,
     cutoff_column: str = "timestamp",
@@ -437,4 +449,677 @@ def query_tokens(
         "total_cache_read_tokens": total_cache_read,
         "total_cache_creation_tokens": total_cache_creation,
         "breakdown": breakdown,
+    }
+
+
+# Phase 3: Cross-Session Timeline Functions
+
+
+def get_user_journey(
+    storage: SQLiteStorage,
+    hours: int = 24,
+    include_projects: bool = True,
+    limit: int = 100,
+) -> dict:
+    """Get all user messages chronologically across sessions.
+
+    Shows how the user moved across sessions and projects over time,
+    revealing task switching, project interleaving, and work patterns.
+
+    Args:
+        storage: Storage instance
+        hours: Number of hours to look back (default: 24)
+        include_projects: Include project info in output (default: True)
+        limit: Maximum messages to return (default: 100)
+
+    Returns:
+        Dict with journey events and pattern analysis
+    """
+    cutoff = datetime.now() - timedelta(hours=hours)
+
+    # Query user messages ordered by timestamp
+    rows = storage.execute_query(
+        """
+        SELECT
+            timestamp,
+            session_id,
+            project_path,
+            user_message_text
+        FROM events
+        WHERE timestamp >= ?
+          AND entry_type = 'user'
+          AND user_message_text IS NOT NULL
+        ORDER BY timestamp ASC
+        LIMIT ?
+        """,
+        (cutoff, limit),
+    )
+
+    # Build journey events
+    journey = []
+    projects_seen = set()
+    project_switches = 0
+    last_project = None
+
+    for row in rows:
+        project = row["project_path"]
+        if project:
+            projects_seen.add(project)
+            if last_project and project != last_project:
+                project_switches += 1
+            last_project = project
+
+        event = {
+            "timestamp": row["timestamp"].isoformat() if row["timestamp"] else None,
+            "session_id": row["session_id"],
+            "message": row["user_message_text"][:200] if row["user_message_text"] else None,
+        }
+        if include_projects:
+            event["project"] = project
+        journey.append(event)
+
+    return {
+        "hours": hours,
+        "message_count": len(journey),
+        "projects_visited": list(projects_seen) if include_projects else None,
+        "project_switches": project_switches if include_projects else None,
+        "journey": journey,
+    }
+
+
+def detect_parallel_sessions(
+    storage: SQLiteStorage,
+    hours: int = 24,
+    min_overlap_minutes: int = 5,
+) -> dict:
+    """Find sessions that were active simultaneously.
+
+    Identifies when multiple sessions were active at the same time,
+    indicating worktree usage, waiting on CI, or multi-task work.
+
+    Args:
+        storage: Storage instance
+        hours: Number of hours to look back (default: 24)
+        min_overlap_minutes: Minimum overlap to consider parallel (default: 5)
+
+    Returns:
+        Dict with parallel session periods and analysis
+    """
+    cutoff = datetime.now() - timedelta(hours=hours)
+
+    # Get session activity ranges
+    rows = storage.execute_query(
+        """
+        SELECT
+            session_id,
+            project_path,
+            MIN(timestamp) as start_time,
+            MAX(timestamp) as end_time,
+            COUNT(*) as event_count
+        FROM events
+        WHERE timestamp >= ?
+        GROUP BY session_id
+        HAVING COUNT(*) > 1
+        ORDER BY start_time
+        """,
+        (cutoff,),
+    )
+
+    sessions = []
+    for row in rows:
+        # Parse timestamps - they come from storage as datetime objects
+        start_time = row["start_time"]
+        end_time = row["end_time"]
+        # Handle case where timestamps are strings (shouldn't happen but defensive)
+        if isinstance(start_time, str):
+            start_time = datetime.fromisoformat(start_time)
+        if isinstance(end_time, str):
+            end_time = datetime.fromisoformat(end_time)
+
+        sessions.append(
+            {
+                "session_id": row["session_id"],
+                "project": row["project_path"],
+                "start": start_time,
+                "end": end_time,
+                "event_count": row["event_count"],
+            }
+        )
+
+    # Find overlapping periods
+    parallel_periods = []
+    min_overlap = timedelta(minutes=min_overlap_minutes)
+
+    for i, s1 in enumerate(sessions):
+        for s2 in sessions[i + 1 :]:
+            # Calculate overlap
+            overlap_start = max(s1["start"], s2["start"])
+            overlap_end = min(s1["end"], s2["end"])
+
+            if overlap_end > overlap_start:
+                overlap_duration = overlap_end - overlap_start
+                if overlap_duration >= min_overlap:
+                    parallel_periods.append(
+                        {
+                            "start": overlap_start.isoformat(),
+                            "end": overlap_end.isoformat(),
+                            "duration_minutes": int(overlap_duration.total_seconds() / 60),
+                            "sessions": [
+                                {
+                                    "session_id": s1["session_id"],
+                                    "project": s1["project"],
+                                },
+                                {
+                                    "session_id": s2["session_id"],
+                                    "project": s2["project"],
+                                },
+                            ],
+                        }
+                    )
+
+    # Sort by duration descending
+    parallel_periods.sort(key=lambda x: x["duration_minutes"], reverse=True)
+
+    return {
+        "hours": hours,
+        "min_overlap_minutes": min_overlap_minutes,
+        "total_sessions": len(sessions),
+        "parallel_period_count": len(parallel_periods),
+        "parallel_periods": parallel_periods[:20],  # Limit to top 20
+    }
+
+
+def find_related_sessions(
+    storage: SQLiteStorage,
+    session_id: str,
+    method: str = "files",
+    days: int = 7,
+    limit: int = 10,
+) -> dict:
+    """Find sessions related to a given session.
+
+    Identifies sessions that share common files, commands, or temporal proximity.
+
+    Args:
+        storage: Storage instance
+        session_id: The session ID to find related sessions for
+        method: How to find related sessions: 'files', 'commands', or 'temporal'
+        days: Number of days to search (default: 7)
+        limit: Maximum related sessions to return (default: 10)
+
+    Returns:
+        Dict with related sessions and their connection strength
+    """
+    cutoff = datetime.now() - timedelta(days=days)
+
+    if method == "files":
+        # Find sessions that touched the same files
+        # First get files touched by the target session
+        target_files = storage.execute_query(
+            """
+            SELECT DISTINCT file_path
+            FROM events
+            WHERE session_id = ? AND file_path IS NOT NULL
+            """,
+            (session_id,),
+        )
+        file_paths = [r["file_path"] for r in target_files]
+
+        if not file_paths:
+            return {
+                "session_id": session_id,
+                "method": method,
+                "related_count": 0,
+                "related_sessions": [],
+            }
+
+        # Find other sessions that touched these files
+        placeholders = ",".join("?" * len(file_paths))
+        rows = storage.execute_query(
+            f"""
+            SELECT
+                session_id,
+                project_path,
+                COUNT(DISTINCT file_path) as shared_files,
+                MIN(timestamp) as first_seen,
+                MAX(timestamp) as last_seen
+            FROM events
+            WHERE session_id != ?
+              AND timestamp >= ?
+              AND file_path IN ({placeholders})
+            GROUP BY session_id
+            ORDER BY shared_files DESC
+            LIMIT ?
+            """,
+            (session_id, cutoff, *file_paths, limit),
+        )
+
+        related = [
+            {
+                "session_id": r["session_id"],
+                "project": r["project_path"],
+                "shared_files": r["shared_files"],
+                "first_seen": _format_timestamp(r["first_seen"]),
+                "last_seen": _format_timestamp(r["last_seen"]),
+            }
+            for r in rows
+        ]
+
+    elif method == "commands":
+        # Find sessions that used the same commands
+        target_commands = storage.execute_query(
+            """
+            SELECT DISTINCT command
+            FROM events
+            WHERE session_id = ? AND command IS NOT NULL
+            """,
+            (session_id,),
+        )
+        commands = [r["command"] for r in target_commands]
+
+        if not commands:
+            return {
+                "session_id": session_id,
+                "method": method,
+                "related_count": 0,
+                "related_sessions": [],
+            }
+
+        placeholders = ",".join("?" * len(commands))
+        rows = storage.execute_query(
+            f"""
+            SELECT
+                session_id,
+                project_path,
+                COUNT(DISTINCT command) as shared_commands,
+                MIN(timestamp) as first_seen,
+                MAX(timestamp) as last_seen
+            FROM events
+            WHERE session_id != ?
+              AND timestamp >= ?
+              AND command IN ({placeholders})
+            GROUP BY session_id
+            ORDER BY shared_commands DESC
+            LIMIT ?
+            """,
+            (session_id, cutoff, *commands, limit),
+        )
+
+        related = [
+            {
+                "session_id": r["session_id"],
+                "project": r["project_path"],
+                "shared_commands": r["shared_commands"],
+                "first_seen": _format_timestamp(r["first_seen"]),
+                "last_seen": _format_timestamp(r["last_seen"]),
+            }
+            for r in rows
+        ]
+
+    elif method == "temporal":
+        # Find sessions that were active around the same time
+        # Get the time range of the target session
+        target_range = storage.execute_query(
+            """
+            SELECT MIN(timestamp) as start_time, MAX(timestamp) as end_time
+            FROM events
+            WHERE session_id = ?
+            """,
+            (session_id,),
+        )
+
+        if not target_range or not target_range[0]["start_time"]:
+            return {
+                "session_id": session_id,
+                "method": method,
+                "related_count": 0,
+                "related_sessions": [],
+            }
+
+        target_start = target_range[0]["start_time"]
+        target_end = target_range[0]["end_time"]
+        # Parse timestamps if strings
+        if isinstance(target_start, str):
+            target_start = datetime.fromisoformat(target_start)
+        if isinstance(target_end, str):
+            target_end = datetime.fromisoformat(target_end)
+
+        # Expand window by 1 hour each direction
+        window_start = target_start - timedelta(hours=1)
+        window_end = target_end + timedelta(hours=1)
+
+        rows = storage.execute_query(
+            """
+            SELECT
+                session_id,
+                project_path,
+                MIN(timestamp) as first_seen,
+                MAX(timestamp) as last_seen,
+                COUNT(*) as event_count
+            FROM events
+            WHERE session_id != ?
+              AND timestamp >= ?
+              AND timestamp <= ?
+            GROUP BY session_id
+            ORDER BY first_seen
+            LIMIT ?
+            """,
+            (session_id, window_start, window_end, limit),
+        )
+
+        related = [
+            {
+                "session_id": r["session_id"],
+                "project": r["project_path"],
+                "event_count": r["event_count"],
+                "first_seen": _format_timestamp(r["first_seen"]),
+                "last_seen": _format_timestamp(r["last_seen"]),
+            }
+            for r in rows
+        ]
+
+    else:
+        return {
+            "error": f"Invalid method: {method}. Use 'files', 'commands', or 'temporal'.",
+        }
+
+    return {
+        "session_id": session_id,
+        "method": method,
+        "related_count": len(related),
+        "related_sessions": related,
+    }
+
+
+def classify_sessions(
+    storage: SQLiteStorage,
+    days: int = 7,
+    project: str | None = None,
+) -> dict:
+    """Classify sessions based on their dominant activity patterns.
+
+    Categories:
+    - debugging: High error rate, repeated tool failures
+    - development: Edit-heavy, file modifications
+    - research: Read/search heavy, exploring codebase
+    - maintenance: CI/git heavy, infrastructure work
+
+    Args:
+        storage: Storage instance
+        days: Number of days to analyze (default: 7)
+        project: Optional project filter
+
+    Returns:
+        Dict with session classifications and category distribution
+    """
+    cutoff = datetime.now() - timedelta(days=days)
+
+    # Build where clause
+    where_parts = ["timestamp >= ?"]
+    params: list = [cutoff]
+
+    if project:
+        where_parts.append("project_path LIKE ?")
+        params.append(f"%{project}%")
+
+    where_clause = " AND ".join(where_parts)
+
+    # Get activity stats per session
+    # Safe: where_clause is built from hardcoded condition strings above
+    rows = storage.execute_query(
+        f"""
+        SELECT
+            session_id,
+            project_path,
+            COUNT(*) as total_events,
+            SUM(CASE WHEN tool_name = 'Edit' THEN 1 ELSE 0 END) as edit_count,
+            SUM(CASE WHEN tool_name = 'Read' THEN 1 ELSE 0 END) as read_count,
+            SUM(CASE WHEN tool_name = 'Write' THEN 1 ELSE 0 END) as write_count,
+            SUM(CASE WHEN tool_name IN ('Grep', 'Glob', 'WebSearch') THEN 1 ELSE 0 END) as search_count,
+            SUM(CASE WHEN tool_name = 'Bash' AND command IN ('git', 'gh') THEN 1 ELSE 0 END) as git_count,
+            SUM(CASE WHEN tool_name = 'Bash' AND command IN ('make', 'cargo', 'npm', 'pytest') THEN 1 ELSE 0 END) as build_count,
+            SUM(CASE WHEN is_error = 1 THEN 1 ELSE 0 END) as error_count,
+            MIN(timestamp) as first_seen,
+            MAX(timestamp) as last_seen
+        FROM events
+        WHERE {where_clause}
+        GROUP BY session_id
+        HAVING COUNT(*) >= 5
+        ORDER BY first_seen DESC
+        """,
+        tuple(params),
+    )
+
+    classifications = []
+    category_counts = {
+        "debugging": 0,
+        "development": 0,
+        "research": 0,
+        "maintenance": 0,
+        "mixed": 0,
+    }
+
+    for row in rows:
+        total = row["total_events"] or 1
+        edit_pct = (row["edit_count"] or 0) / total
+        read_pct = (row["read_count"] or 0) / total
+        search_pct = (row["search_count"] or 0) / total
+        git_pct = (row["git_count"] or 0) / total
+        build_pct = (row["build_count"] or 0) / total
+        error_pct = (row["error_count"] or 0) / total
+
+        # Classification heuristics based on activity ratios
+        # Thresholds derived from typical session patterns:
+        # - Debugging: High error rate signals troubleshooting (>15% or 5+ errors)
+        # - Development: Heavy editing indicates feature work (>30% edits or 3+ writes)
+        # - Maintenance: Git/build focus without editing (>30% combined)
+        # - Research: Mostly reading/searching codebase (>50% combined)
+        # - Mixed: No dominant pattern, balanced activity
+        if error_pct > 0.15 or (row["error_count"] or 0) > 5:
+            category = "debugging"
+            confidence = min(1.0, error_pct * 3)
+        elif edit_pct > 0.3 or (row["write_count"] or 0) > 3:
+            category = "development"
+            confidence = min(1.0, (edit_pct + (row["write_count"] or 0) / total) * 2)
+        elif git_pct + build_pct > 0.3:
+            category = "maintenance"
+            confidence = min(1.0, (git_pct + build_pct) * 2)
+        elif read_pct + search_pct > 0.5:
+            category = "research"
+            confidence = min(1.0, (read_pct + search_pct) * 1.5)
+        else:
+            category = "mixed"
+            confidence = 0.5
+
+        category_counts[category] += 1
+
+        classifications.append(
+            {
+                "session_id": row["session_id"],
+                "project": row["project_path"],
+                "category": category,
+                "confidence": round(confidence, 2),
+                "stats": {
+                    "total_events": row["total_events"],
+                    "edit_count": row["edit_count"] or 0,
+                    "read_count": row["read_count"] or 0,
+                    "search_count": row["search_count"] or 0,
+                    "git_count": row["git_count"] or 0,
+                    "error_count": row["error_count"] or 0,
+                },
+                "first_seen": _format_timestamp(row["first_seen"]),
+                "last_seen": _format_timestamp(row["last_seen"]),
+            }
+        )
+
+    return {
+        "days": days,
+        "project": project,
+        "session_count": len(classifications),
+        "category_distribution": category_counts,
+        "sessions": classifications[:50],  # Limit output
+    }
+
+
+def get_handoff_context(
+    storage: SQLiteStorage,
+    session_id: str | None = None,
+    hours: int = 4,
+    message_limit: int = 10,
+) -> dict:
+    """Get context for session handoff (useful for /status-report).
+
+    Provides recent activity summary including:
+    - Last N user messages
+    - Files modified
+    - Commands run
+    - Session duration and activity stats
+
+    Args:
+        storage: Storage instance
+        session_id: Optional specific session ID (default: most recent session)
+        hours: Hours to look back if no session specified (default: 4)
+        message_limit: Maximum messages to return (default: 10)
+
+    Returns:
+        Dict with handoff context including messages, files, and activity summary
+    """
+    cutoff = datetime.now() - timedelta(hours=hours)
+
+    # If no session specified, get the most recent session
+    if not session_id:
+        recent = storage.execute_query(
+            """
+            SELECT DISTINCT session_id, MAX(timestamp) as last_activity
+            FROM events
+            WHERE timestamp >= ?
+            GROUP BY session_id
+            ORDER BY last_activity DESC
+            LIMIT 1
+            """,
+            (cutoff,),
+        )
+        if not recent:
+            return {
+                "error": "No recent sessions found",
+                "session_id": None,
+                "hours": hours,
+            }
+        session_id = recent[0]["session_id"]
+
+    # Get session boundaries
+    session_info = storage.execute_query(
+        """
+        SELECT
+            MIN(timestamp) as first_seen,
+            MAX(timestamp) as last_seen,
+            COUNT(*) as total_events,
+            project_path
+        FROM events
+        WHERE session_id = ?
+        GROUP BY session_id
+        """,
+        (session_id,),
+    )
+
+    if not session_info:
+        return {
+            "error": f"Session not found: {session_id}",
+            "session_id": session_id,
+        }
+
+    info = session_info[0]
+    first_seen = info["first_seen"]
+    last_seen = info["last_seen"]
+    if isinstance(first_seen, str):
+        first_seen = datetime.fromisoformat(first_seen)
+    if isinstance(last_seen, str):
+        last_seen = datetime.fromisoformat(last_seen)
+
+    duration_minutes = (
+        int((last_seen - first_seen).total_seconds() / 60) if last_seen and first_seen else 0
+    )
+
+    # Get recent user messages
+    messages = storage.execute_query(
+        """
+        SELECT timestamp, user_message_text
+        FROM events
+        WHERE session_id = ?
+          AND entry_type = 'user'
+          AND user_message_text IS NOT NULL
+        ORDER BY timestamp DESC
+        LIMIT ?
+        """,
+        (session_id, message_limit),
+    )
+
+    recent_messages = [
+        {
+            "timestamp": _format_timestamp(m["timestamp"]),
+            "message": m["user_message_text"][:200] if m["user_message_text"] else None,
+        }
+        for m in messages
+    ]
+
+    # Get files modified
+    files = storage.execute_query(
+        """
+        SELECT DISTINCT file_path, COUNT(*) as touch_count
+        FROM events
+        WHERE session_id = ?
+          AND file_path IS NOT NULL
+          AND tool_name IN ('Edit', 'Write')
+        GROUP BY file_path
+        ORDER BY touch_count DESC
+        LIMIT 10
+        """,
+        (session_id,),
+    )
+
+    modified_files = [{"file": f["file_path"], "touches": f["touch_count"]} for f in files]
+
+    # Get commands run
+    commands = storage.execute_query(
+        """
+        SELECT command, COUNT(*) as run_count
+        FROM events
+        WHERE session_id = ?
+          AND command IS NOT NULL
+        GROUP BY command
+        ORDER BY run_count DESC
+        LIMIT 10
+        """,
+        (session_id,),
+    )
+
+    recent_commands = [{"command": c["command"], "count": c["run_count"]} for c in commands]
+
+    # Get tool usage summary
+    tools = storage.execute_query(
+        """
+        SELECT tool_name, COUNT(*) as use_count
+        FROM events
+        WHERE session_id = ?
+          AND tool_name IS NOT NULL
+        GROUP BY tool_name
+        ORDER BY use_count DESC
+        LIMIT 10
+        """,
+        (session_id,),
+    )
+
+    tool_summary = [{"tool": t["tool_name"], "count": t["use_count"]} for t in tools]
+
+    return {
+        "session_id": session_id,
+        "project": info["project_path"],
+        "first_seen": _format_timestamp(first_seen),
+        "last_seen": _format_timestamp(last_seen),
+        "duration_minutes": duration_minutes,
+        "total_events": info["total_events"],
+        "recent_messages": recent_messages,
+        "modified_files": modified_files,
+        "recent_commands": recent_commands,
+        "tool_summary": tool_summary,
     }

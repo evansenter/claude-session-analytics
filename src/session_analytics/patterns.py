@@ -2,6 +2,7 @@
 
 import json
 import logging
+import random
 from collections import Counter
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -177,6 +178,354 @@ def compute_sequence_patterns(
     return patterns
 
 
+def sample_sequences(
+    storage: SQLiteStorage,
+    pattern: str,
+    count: int = 5,
+    context_events: int = 2,
+    days: int = 7,
+) -> dict:
+    """Return random samples of a sequence pattern with surrounding context.
+
+    Instead of just counting occurrences, this function returns actual examples
+    of a pattern with context, enabling LLM interpretation of workflow patterns.
+
+    Args:
+        storage: Storage instance
+        pattern: Sequence pattern (e.g., "Read → Edit" or "Read,Edit")
+        count: Number of random samples to return (default: 5)
+        context_events: Number of events before/after to include (default: 2)
+        days: Number of days to analyze
+
+    Returns:
+        Dict with pattern info, total occurrences, and sampled instances
+    """
+    cutoff = datetime.now() - timedelta(days=days)
+
+    # Validate pattern input
+    if len(pattern) > 500:
+        return {
+            "pattern": pattern[:50] + "...",
+            "error": "Pattern too long (max 500 characters)",
+            "total_occurrences": 0,
+            "samples": [],
+        }
+
+    # Parse pattern into tool list (support both "→" and "," separators)
+    if " → " in pattern:
+        target_tools = [t.strip() for t in pattern.split(" → ")]
+    else:
+        target_tools = [t.strip() for t in pattern.split(",")]
+
+    # Validate individual tool names (alphanumeric + underscore only)
+    for tool in target_tools:
+        if not tool or not all(c.isalnum() or c == "_" for c in tool):
+            return {
+                "pattern": pattern,
+                "error": f"Invalid tool name: '{tool}' (must be alphanumeric)",
+                "total_occurrences": 0,
+                "samples": [],
+            }
+
+    sequence_length = len(target_tools)
+    if sequence_length < 2:
+        return {
+            "pattern": pattern,
+            "error": "Pattern must contain at least 2 tools",
+            "total_occurrences": 0,
+            "samples": [],
+        }
+
+    # Get all tool events ordered by session and timestamp
+    rows = storage.execute_query(
+        """
+        SELECT id, session_id, tool_name, timestamp, project_path, file_path, command
+        FROM events
+        WHERE timestamp >= ? AND tool_name IS NOT NULL
+        ORDER BY session_id, timestamp
+        """,
+        (cutoff,),
+    )
+
+    # Group events by session and find pattern occurrences
+    occurrences = []  # List of (session_id, start_index, events_slice)
+    current_session = None
+    session_events: list[dict] = []
+
+    for row in rows:
+        if row["session_id"] != current_session:
+            # Process previous session to find pattern matches
+            if len(session_events) >= sequence_length:
+                for i in range(len(session_events) - sequence_length + 1):
+                    tools = [session_events[j]["tool_name"] for j in range(i, i + sequence_length)]
+                    if tools == target_tools:
+                        # Calculate context boundaries
+                        start_ctx = max(0, i - context_events)
+                        end_ctx = min(len(session_events), i + sequence_length + context_events)
+                        occurrences.append(
+                            {
+                                "session_id": current_session,
+                                "match_start": i,
+                                "context_start": start_ctx,
+                                "events": session_events[start_ctx:end_ctx],
+                                "match_offset": i
+                                - start_ctx,  # Where in events slice the match starts
+                            }
+                        )
+
+            current_session = row["session_id"]
+            session_events = []
+
+        session_events.append(
+            {
+                "id": row["id"],
+                "tool_name": row["tool_name"],
+                "timestamp": row["timestamp"],
+                "project_path": row["project_path"],
+                "file_path": row["file_path"],
+                "command": row["command"],
+            }
+        )
+
+    # Process last session
+    if len(session_events) >= sequence_length:
+        for i in range(len(session_events) - sequence_length + 1):
+            tools = [session_events[j]["tool_name"] for j in range(i, i + sequence_length)]
+            if tools == target_tools:
+                start_ctx = max(0, i - context_events)
+                end_ctx = min(len(session_events), i + sequence_length + context_events)
+                occurrences.append(
+                    {
+                        "session_id": current_session,
+                        "match_start": i,
+                        "context_start": start_ctx,
+                        "events": session_events[start_ctx:end_ctx],
+                        "match_offset": i - start_ctx,
+                    }
+                )
+
+    total_occurrences = len(occurrences)
+
+    # Random sample
+    if total_occurrences <= count:
+        samples = occurrences
+    else:
+        samples = random.sample(occurrences, count)
+
+    # Format samples for output
+    formatted_samples = []
+    for sample in samples:
+        events = sample["events"]
+        match_start = sample["match_offset"]
+        match_end = match_start + sequence_length
+
+        formatted_events = []
+        for idx, evt in enumerate(events):
+            formatted_evt = {
+                "tool": evt["tool_name"],
+                "timestamp": evt["timestamp"].isoformat() if evt["timestamp"] else None,
+                "is_match": match_start <= idx < match_end,
+            }
+            if evt["file_path"]:
+                formatted_evt["file"] = evt["file_path"]
+            if evt["command"]:
+                formatted_evt["command"] = evt["command"]
+            formatted_events.append(formatted_evt)
+
+        # Get project from first event
+        project = events[0]["project_path"] if events else None
+
+        formatted_samples.append(
+            {
+                "session_id": sample["session_id"],
+                "project": project,
+                "timestamp": events[match_start]["timestamp"].isoformat()
+                if events and events[match_start]["timestamp"]
+                else None,
+                "events": formatted_events,
+            }
+        )
+
+    return {
+        "pattern": pattern,
+        "parsed_tools": target_tools,
+        "total_occurrences": total_occurrences,
+        "sample_count": len(formatted_samples),
+        "context_events": context_events,
+        "samples": formatted_samples,
+    }
+
+
+def analyze_failures(
+    storage: SQLiteStorage,
+    days: int = 7,
+    rework_window_minutes: int = 10,
+) -> dict:
+    """Analyze failure patterns and recovery behavior.
+
+    Identifies:
+    - Tool errors (is_error=True in tool_result)
+    - Rework patterns (same file edited multiple times quickly)
+    - Error clustering by tool/command
+
+    Args:
+        storage: Storage instance
+        days: Number of days to analyze (default: 7)
+        rework_window_minutes: Time window for detecting rework (default: 10)
+
+    Returns:
+        Dict with failure analysis including error counts, rework patterns, recovery times
+    """
+    cutoff = datetime.now() - timedelta(days=days)
+
+    # Get all error events
+    error_rows = storage.execute_query(
+        """
+        SELECT
+            id,
+            timestamp,
+            session_id,
+            project_path,
+            tool_id,
+            tool_name
+        FROM events
+        WHERE timestamp >= ?
+          AND is_error = 1
+        ORDER BY timestamp
+        """,
+        (cutoff,),
+    )
+
+    # Count errors by session
+    errors_by_session: dict[str, int] = {}
+    total_errors = 0
+
+    for row in error_rows:
+        total_errors += 1
+        session_id = row["session_id"]
+        errors_by_session[session_id] = errors_by_session.get(session_id, 0) + 1
+
+    # Get error counts by associated tool (from tool_use before tool_result)
+    tool_error_counts = storage.execute_query(
+        """
+        SELECT
+            e2.tool_name,
+            COUNT(*) as error_count
+        FROM events e1
+        JOIN events e2 ON e1.tool_id = e2.tool_id AND e2.entry_type = 'tool_use'
+        WHERE e1.timestamp >= ?
+          AND e1.is_error = 1
+          AND e1.entry_type = 'tool_result'
+        GROUP BY e2.tool_name
+        ORDER BY error_count DESC
+        """,
+        (cutoff,),
+    )
+
+    errors_by_tool = [
+        {"tool": row["tool_name"], "errors": row["error_count"]}
+        for row in tool_error_counts
+        if row["tool_name"]
+    ]
+
+    # Detect rework patterns: same file edited multiple times in quick succession
+    rework_window = timedelta(minutes=rework_window_minutes)
+
+    file_edits = storage.execute_query(
+        """
+        SELECT
+            timestamp,
+            session_id,
+            file_path
+        FROM events
+        WHERE timestamp >= ?
+          AND tool_name = 'Edit'
+          AND file_path IS NOT NULL
+        ORDER BY session_id, file_path, timestamp
+        """,
+        (cutoff,),
+    )
+
+    rework_instances = []
+    current_file = None
+    current_session = None
+    edits_in_window: list[datetime] = []
+
+    for row in file_edits:
+        file_path = row["file_path"]
+        session_id = row["session_id"]
+        timestamp = row["timestamp"]
+        if isinstance(timestamp, str):
+            timestamp = datetime.fromisoformat(timestamp)
+
+        # Reset if different file or session
+        if file_path != current_file or session_id != current_session:
+            # Check if previous file had rework
+            if len(edits_in_window) >= 3:
+                rework_instances.append(
+                    {
+                        "file": current_file,
+                        "session_id": current_session,
+                        "edit_count": len(edits_in_window),
+                        "duration_minutes": int(
+                            (edits_in_window[-1] - edits_in_window[0]).total_seconds() / 60
+                        ),
+                    }
+                )
+
+            current_file = file_path
+            current_session = session_id
+            edits_in_window = [timestamp]
+        else:
+            # Same file/session - check if within window
+            if edits_in_window and timestamp - edits_in_window[-1] <= rework_window:
+                edits_in_window.append(timestamp)
+            else:
+                # Gap too large, check if we had rework
+                if len(edits_in_window) >= 3:
+                    rework_instances.append(
+                        {
+                            "file": current_file,
+                            "session_id": current_session,
+                            "edit_count": len(edits_in_window),
+                            "duration_minutes": int(
+                                (edits_in_window[-1] - edits_in_window[0]).total_seconds() / 60
+                            ),
+                        }
+                    )
+                edits_in_window = [timestamp]
+
+    # Check final file
+    if len(edits_in_window) >= 3:
+        rework_instances.append(
+            {
+                "file": current_file,
+                "session_id": current_session,
+                "edit_count": len(edits_in_window),
+                "duration_minutes": int(
+                    (edits_in_window[-1] - edits_in_window[0]).total_seconds() / 60
+                ),
+            }
+        )
+
+    # Calculate summary stats
+    sessions_with_errors = len(errors_by_session)
+    avg_errors_per_session = total_errors / sessions_with_errors if sessions_with_errors > 0 else 0
+
+    return {
+        "days": days,
+        "total_errors": total_errors,
+        "sessions_with_errors": sessions_with_errors,
+        "avg_errors_per_session": round(avg_errors_per_session, 2),
+        "errors_by_tool": errors_by_tool[:10],
+        "rework_patterns": {
+            "instances_detected": len(rework_instances),
+            "rework_window_minutes": rework_window_minutes,
+            "examples": rework_instances[:10],
+        },
+    }
+
+
 def load_allowed_commands(settings_path: Path = DEFAULT_SETTINGS_PATH) -> set[str]:
     """Load allowed commands from Claude Code settings.json.
 
@@ -313,16 +662,21 @@ def get_insights(
     storage: SQLiteStorage,
     refresh: bool = False,
     days: int = 7,
+    include_advanced: bool = True,
 ) -> dict:
     """Get pre-computed insights for /improve-workflow.
+
+    Includes both traditional pattern analysis and advanced LLM-focused analytics
+    from RFC #17 phases.
 
     Args:
         storage: Storage instance
         refresh: Force recomputation of patterns
         days: Number of days to analyze (only used if refresh=True)
+        include_advanced: Include advanced analytics (trends, failures, classification)
 
     Returns:
-        Insights organized by type
+        Insights organized by type, with optional advanced analytics
     """
     # Check if we need to refresh
     patterns = storage.get_patterns()
@@ -362,4 +716,224 @@ def get_insights(
         "permission_gaps_found": len(insights["permission_gaps"]),
     }
 
+    # Add advanced analytics from RFC #17 phases
+    if include_advanced:
+        # Trend analysis (Phase 7)
+        try:
+            trends = analyze_trends(storage, days=days, compare_to="previous")
+            insights["trends"] = {
+                "events_direction": trends["metrics"]["events"]["direction"],
+                "events_change_pct": trends["metrics"]["events"]["change_pct"],
+                "sessions_direction": trends["metrics"]["sessions"]["direction"],
+                "sessions_change_pct": trends["metrics"]["sessions"]["change_pct"],
+                "error_rate_direction": trends["metrics"]["error_rate"]["direction"],
+                "significant_tool_changes": [
+                    tc
+                    for tc in trends.get("tool_changes", [])[:3]
+                    if tc["direction"] != "unchanged"
+                ],
+            }
+            insights["summary"]["has_trends"] = True
+        except Exception as e:
+            logger.warning("Failed to analyze trends in get_insights: %s", e, exc_info=True)
+            insights["summary"]["has_trends"] = False
+
+        # Failure analysis summary (Phase 4)
+        try:
+            failures = analyze_failures(storage, days=days)
+            insights["failure_summary"] = {
+                "total_errors": failures["total_errors"],
+                "sessions_with_errors": failures["sessions_with_errors"],
+                "rework_instances": failures["rework_patterns"]["instances_detected"],
+                "top_error_tools": failures["errors_by_tool"][:3],
+            }
+            insights["summary"]["has_failure_analysis"] = True
+        except Exception as e:
+            logger.warning("Failed to analyze failures in get_insights: %s", e, exc_info=True)
+            insights["summary"]["has_failure_analysis"] = False
+
+        # Session classification summary (Phase 5) - import here to avoid circular
+        from session_analytics.queries import classify_sessions
+
+        try:
+            classification = classify_sessions(storage, days=days)
+            insights["session_types"] = classification.get("category_distribution", {})
+            insights["summary"]["total_sessions_classified"] = classification.get(
+                "session_count", 0
+            )
+            insights["summary"]["has_classification"] = True
+        except Exception as e:
+            logger.warning("Failed to classify sessions in get_insights: %s", e, exc_info=True)
+            insights["summary"]["has_classification"] = False
+
     return insights
+
+
+def analyze_trends(
+    storage: SQLiteStorage,
+    days: int = 7,
+    compare_to: str = "previous",
+) -> dict:
+    """Analyze trends by comparing current period to previous period.
+
+    Compares metrics between two time periods to identify changes in usage patterns.
+
+    Args:
+        storage: Storage instance
+        days: Length of current period in days (default: 7)
+        compare_to: Comparison type: 'previous' (same length before current)
+                    or 'same_last_month' (same days in previous month) (default: previous)
+
+    Returns:
+        Dict with trend analysis including percentage changes and direction
+    """
+    now = datetime.now()
+    current_start = now - timedelta(days=days)
+
+    if compare_to == "previous":
+        previous_start = current_start - timedelta(days=days)
+        previous_end = current_start
+    else:
+        # same_last_month - compare to same period last month
+        previous_start = now - timedelta(days=30 + days)
+        previous_end = now - timedelta(days=30)
+
+    def get_period_metrics(start: datetime, end: datetime) -> dict:
+        """Get metrics for a specific time period."""
+        # Total events
+        event_count = storage.execute_query(
+            """
+            SELECT COUNT(*) as count FROM events
+            WHERE timestamp >= ? AND timestamp < ?
+            """,
+            (start, end),
+        )
+        total_events = event_count[0]["count"] if event_count else 0
+
+        # Session count
+        session_count = storage.execute_query(
+            """
+            SELECT COUNT(DISTINCT session_id) as count FROM events
+            WHERE timestamp >= ? AND timestamp < ?
+            """,
+            (start, end),
+        )
+        sessions = session_count[0]["count"] if session_count else 0
+
+        # Error count
+        error_count = storage.execute_query(
+            """
+            SELECT COUNT(*) as count FROM events
+            WHERE timestamp >= ? AND timestamp < ? AND is_error = 1
+            """,
+            (start, end),
+        )
+        errors = error_count[0]["count"] if error_count else 0
+
+        # Tool usage
+        tool_usage = storage.execute_query(
+            """
+            SELECT tool_name, COUNT(*) as count
+            FROM events
+            WHERE timestamp >= ? AND timestamp < ? AND tool_name IS NOT NULL
+            GROUP BY tool_name
+            ORDER BY count DESC
+            LIMIT 10
+            """,
+            (start, end),
+        )
+        top_tools = {row["tool_name"]: row["count"] for row in tool_usage}
+
+        # Token usage
+        token_usage = storage.execute_query(
+            """
+            SELECT
+                COALESCE(SUM(input_tokens), 0) as input_tokens,
+                COALESCE(SUM(output_tokens), 0) as output_tokens
+            FROM events
+            WHERE timestamp >= ? AND timestamp < ?
+            """,
+            (start, end),
+        )
+        tokens = token_usage[0] if token_usage else {"input_tokens": 0, "output_tokens": 0}
+
+        return {
+            "total_events": total_events,
+            "sessions": sessions,
+            "errors": errors,
+            "error_rate": errors / total_events if total_events > 0 else 0,
+            "top_tools": top_tools,
+            "input_tokens": tokens["input_tokens"] or 0,
+            "output_tokens": tokens["output_tokens"] or 0,
+        }
+
+    def calculate_change(current: float, previous: float) -> dict:
+        """Calculate percentage change and direction."""
+        if previous == 0:
+            if current == 0:
+                pct_change = 0.0
+                direction = "unchanged"
+            else:
+                pct_change = 100.0
+                direction = "up"
+        else:
+            pct_change = ((current - previous) / previous) * 100
+            if pct_change > 5:
+                direction = "up"
+            elif pct_change < -5:
+                direction = "down"
+            else:
+                direction = "unchanged"
+
+        return {
+            "current": current,
+            "previous": previous,
+            "change_pct": round(pct_change, 1),
+            "direction": direction,
+        }
+
+    current_metrics = get_period_metrics(current_start, now)
+    previous_metrics = get_period_metrics(previous_start, previous_end)
+
+    # Calculate tool-specific changes
+    tool_changes = []
+    all_tools = set(current_metrics["top_tools"].keys()) | set(previous_metrics["top_tools"].keys())
+    for tool in all_tools:
+        current_count = current_metrics["top_tools"].get(tool, 0)
+        previous_count = previous_metrics["top_tools"].get(tool, 0)
+        change = calculate_change(current_count, previous_count)
+        if change["direction"] != "unchanged" or current_count > 0:
+            tool_changes.append({"tool": tool, **change})
+
+    # Sort by absolute change magnitude
+    tool_changes.sort(key=lambda x: abs(x["change_pct"]), reverse=True)
+
+    return {
+        "days": days,
+        "compare_to": compare_to,
+        "current_period": {
+            "start": current_start.isoformat(),
+            "end": now.isoformat(),
+        },
+        "previous_period": {
+            "start": previous_start.isoformat(),
+            "end": previous_end.isoformat(),
+        },
+        "metrics": {
+            "events": calculate_change(
+                current_metrics["total_events"], previous_metrics["total_events"]
+            ),
+            "sessions": calculate_change(current_metrics["sessions"], previous_metrics["sessions"]),
+            "errors": calculate_change(current_metrics["errors"], previous_metrics["errors"]),
+            "error_rate": calculate_change(
+                current_metrics["error_rate"], previous_metrics["error_rate"]
+            ),
+            "input_tokens": calculate_change(
+                current_metrics["input_tokens"], previous_metrics["input_tokens"]
+            ),
+            "output_tokens": calculate_change(
+                current_metrics["output_tokens"], previous_metrics["output_tokens"]
+            ),
+        },
+        "tool_changes": tool_changes[:10],
+    }

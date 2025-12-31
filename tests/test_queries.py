@@ -300,3 +300,916 @@ class TestEnsureFreshData:
         """Test that force=True always refreshes."""
         refreshed = ensure_fresh_data(populated_storage, force=True)
         assert refreshed
+
+
+# Phase 3: Cross-Session Timeline Tests
+
+
+class TestGetUserJourney:
+    """Tests for get_user_journey function."""
+
+    def test_basic_journey(self, storage):
+        """Test basic user journey extraction."""
+        from session_analytics.queries import get_user_journey
+
+        now = datetime.now()
+        events = [
+            Event(
+                id=None,
+                uuid="j1",
+                timestamp=now - timedelta(hours=2),
+                session_id="s1",
+                project_path="project-a",
+                entry_type="user",
+                user_message_text="Start working on feature",
+            ),
+            Event(
+                id=None,
+                uuid="j2",
+                timestamp=now - timedelta(hours=1),
+                session_id="s2",
+                project_path="project-b",
+                entry_type="user",
+                user_message_text="Fix bug in other project",
+            ),
+        ]
+        storage.add_events_batch(events)
+
+        result = get_user_journey(storage, hours=24)
+
+        assert result["message_count"] == 2
+        assert len(result["projects_visited"]) == 2
+        assert result["project_switches"] == 1
+
+    def test_journey_excludes_tool_events(self, storage):
+        """Test that journey only includes user messages."""
+        from session_analytics.queries import get_user_journey
+
+        now = datetime.now()
+        events = [
+            Event(
+                id=None,
+                uuid="u1",
+                timestamp=now - timedelta(hours=1),
+                session_id="s1",
+                entry_type="user",
+                user_message_text="User message",
+            ),
+            Event(
+                id=None,
+                uuid="t1",
+                timestamp=now - timedelta(minutes=30),
+                session_id="s1",
+                entry_type="tool_use",
+                tool_name="Read",
+            ),
+        ]
+        storage.add_events_batch(events)
+
+        result = get_user_journey(storage, hours=24)
+
+        # Should only have the user message, not the tool use
+        assert result["message_count"] == 1
+
+
+class TestDetectParallelSessions:
+    """Tests for detect_parallel_sessions function."""
+
+    def test_detect_overlapping_sessions(self, storage):
+        """Test detection of overlapping sessions."""
+        from session_analytics.queries import detect_parallel_sessions
+
+        now = datetime.now()
+        # Two sessions that overlap
+        events = [
+            # Session 1: 2h ago to 30min ago
+            Event(
+                id=None,
+                uuid="p1",
+                timestamp=now - timedelta(hours=2),
+                session_id="s1",
+                project_path="project-a",
+                entry_type="tool_use",
+                tool_name="Read",
+            ),
+            Event(
+                id=None,
+                uuid="p2",
+                timestamp=now - timedelta(minutes=30),
+                session_id="s1",
+                project_path="project-a",
+                entry_type="tool_use",
+                tool_name="Edit",
+            ),
+            # Session 2: 1h ago to now (overlaps with s1)
+            Event(
+                id=None,
+                uuid="p3",
+                timestamp=now - timedelta(hours=1),
+                session_id="s2",
+                project_path="project-b",
+                entry_type="tool_use",
+                tool_name="Read",
+            ),
+            Event(
+                id=None,
+                uuid="p4",
+                timestamp=now,
+                session_id="s2",
+                project_path="project-b",
+                entry_type="tool_use",
+                tool_name="Edit",
+            ),
+        ]
+        storage.add_events_batch(events)
+
+        result = detect_parallel_sessions(storage, hours=24, min_overlap_minutes=1)
+
+        assert result["total_sessions"] == 2
+        assert result["parallel_period_count"] >= 1
+
+    def test_no_parallel_sessions(self, storage):
+        """Test when sessions don't overlap."""
+        from session_analytics.queries import detect_parallel_sessions
+
+        now = datetime.now()
+        # Two non-overlapping sessions
+        events = [
+            Event(
+                id=None,
+                uuid="n1",
+                timestamp=now - timedelta(hours=5),
+                session_id="s1",
+                entry_type="tool_use",
+                tool_name="Read",
+            ),
+            Event(
+                id=None,
+                uuid="n2",
+                timestamp=now - timedelta(hours=4),
+                session_id="s1",
+                entry_type="tool_use",
+                tool_name="Edit",
+            ),
+            Event(
+                id=None,
+                uuid="n3",
+                timestamp=now - timedelta(hours=2),
+                session_id="s2",
+                entry_type="tool_use",
+                tool_name="Read",
+            ),
+            Event(
+                id=None,
+                uuid="n4",
+                timestamp=now - timedelta(hours=1),
+                session_id="s2",
+                entry_type="tool_use",
+                tool_name="Edit",
+            ),
+        ]
+        storage.add_events_batch(events)
+
+        result = detect_parallel_sessions(storage, hours=24, min_overlap_minutes=5)
+
+        assert result["parallel_period_count"] == 0
+
+
+class TestFindRelatedSessions:
+    """Tests for find_related_sessions function."""
+
+    def test_find_by_files(self, storage):
+        """Test finding related sessions by shared files."""
+        from session_analytics.queries import find_related_sessions
+
+        now = datetime.now()
+        events = [
+            # Session 1 touches file.py
+            Event(
+                id=None,
+                uuid="r1",
+                timestamp=now - timedelta(hours=2),
+                session_id="s1",
+                project_path="project",
+                entry_type="tool_use",
+                tool_name="Read",
+                file_path="/path/to/file.py",
+            ),
+            # Session 2 also touches file.py
+            Event(
+                id=None,
+                uuid="r2",
+                timestamp=now - timedelta(hours=1),
+                session_id="s2",
+                project_path="project",
+                entry_type="tool_use",
+                tool_name="Edit",
+                file_path="/path/to/file.py",
+            ),
+        ]
+        storage.add_events_batch(events)
+
+        result = find_related_sessions(storage, session_id="s1", method="files", days=7)
+
+        assert result["related_count"] == 1
+        assert result["related_sessions"][0]["session_id"] == "s2"
+
+    def test_find_by_commands(self, storage):
+        """Test finding related sessions by shared commands."""
+        from session_analytics.queries import find_related_sessions
+
+        now = datetime.now()
+        events = [
+            Event(
+                id=None,
+                uuid="c1",
+                timestamp=now - timedelta(hours=2),
+                session_id="s1",
+                entry_type="tool_use",
+                tool_name="Bash",
+                command="make",
+            ),
+            Event(
+                id=None,
+                uuid="c2",
+                timestamp=now - timedelta(hours=1),
+                session_id="s2",
+                entry_type="tool_use",
+                tool_name="Bash",
+                command="make",
+            ),
+        ]
+        storage.add_events_batch(events)
+
+        result = find_related_sessions(storage, session_id="s1", method="commands", days=7)
+
+        assert result["related_count"] == 1
+
+    def test_find_by_temporal(self, storage):
+        """Test finding related sessions by temporal proximity."""
+        from session_analytics.queries import find_related_sessions
+
+        now = datetime.now()
+        events = [
+            Event(
+                id=None,
+                uuid="t1",
+                timestamp=now - timedelta(hours=2),
+                session_id="s1",
+                entry_type="tool_use",
+                tool_name="Read",
+            ),
+            Event(
+                id=None,
+                uuid="t2",
+                timestamp=now - timedelta(hours=2, minutes=30),
+                session_id="s2",
+                entry_type="tool_use",
+                tool_name="Edit",
+            ),
+        ]
+        storage.add_events_batch(events)
+
+        result = find_related_sessions(storage, session_id="s1", method="temporal", days=7)
+
+        assert result["related_count"] == 1
+
+    def test_invalid_method(self, storage):
+        """Test that invalid method returns error."""
+        from session_analytics.queries import find_related_sessions
+
+        result = find_related_sessions(storage, session_id="s1", method="invalid", days=7)
+
+        assert "error" in result
+
+    def test_find_by_files_no_files_in_target(self, storage):
+        """Test when target session has no file_path values."""
+        from session_analytics.queries import find_related_sessions
+
+        now = datetime.now()
+        events = [
+            # Target session with no file_path (only Bash commands)
+            Event(
+                id=None,
+                uuid="nofile-1",
+                timestamp=now - timedelta(hours=1),
+                session_id="target-session",
+                entry_type="tool_use",
+                tool_name="Bash",
+                command="git",
+            ),
+            # Other session with file_path
+            Event(
+                id=None,
+                uuid="hasfile-1",
+                timestamp=now - timedelta(hours=2),
+                session_id="other-session",
+                entry_type="tool_use",
+                tool_name="Read",
+                file_path="/some/file.py",
+            ),
+        ]
+        storage.add_events_batch(events)
+
+        result = find_related_sessions(storage, session_id="target-session", method="files", days=7)
+
+        # Should return empty related_sessions, not error
+        assert "error" not in result
+        assert result["related_count"] == 0
+        assert result["related_sessions"] == []
+
+    def test_find_by_commands_no_commands_in_target(self, storage):
+        """Test when target session has no command values."""
+        from session_analytics.queries import find_related_sessions
+
+        now = datetime.now()
+        events = [
+            # Target session with no commands (only Read/Edit)
+            Event(
+                id=None,
+                uuid="nocmd-1",
+                timestamp=now - timedelta(hours=1),
+                session_id="target-session",
+                entry_type="tool_use",
+                tool_name="Read",
+                file_path="/file.py",
+            ),
+            # Other session with commands
+            Event(
+                id=None,
+                uuid="hascmd-1",
+                timestamp=now - timedelta(hours=2),
+                session_id="other-session",
+                entry_type="tool_use",
+                tool_name="Bash",
+                command="make",
+            ),
+        ]
+        storage.add_events_batch(events)
+
+        result = find_related_sessions(
+            storage, session_id="target-session", method="commands", days=7
+        )
+
+        # Should return empty related_sessions, not error
+        assert "error" not in result
+        assert result["related_count"] == 0
+        assert result["related_sessions"] == []
+
+
+class TestGetHandoffContext:
+    """Tests for get_handoff_context()."""
+
+    def test_no_recent_sessions(self, storage):
+        """Test when no recent sessions exist."""
+        from session_analytics.queries import get_handoff_context
+
+        result = get_handoff_context(storage, hours=1)
+
+        assert "error" in result
+        assert "No recent sessions" in result["error"]
+
+    def test_specific_session_not_found(self, storage):
+        """Test when specified session doesn't exist."""
+        from session_analytics.queries import get_handoff_context
+
+        result = get_handoff_context(storage, session_id="nonexistent-session")
+
+        assert "error" in result
+        assert "Session not found" in result["error"]
+
+    def test_returns_session_info(self, storage):
+        """Test that session info is returned correctly."""
+        from session_analytics.queries import get_handoff_context
+
+        now = datetime.now()
+        events = [
+            Event(
+                id=None,
+                uuid="h1",
+                timestamp=now - timedelta(hours=1),
+                session_id="test-session",
+                project_path="/test/project",
+                entry_type="user",
+                user_message_text="Hello, let's start",
+            ),
+            Event(
+                id=None,
+                uuid="h2",
+                timestamp=now - timedelta(minutes=30),
+                session_id="test-session",
+                project_path="/test/project",
+                entry_type="tool_use",
+                tool_name="Edit",
+                file_path="/test/file.py",
+            ),
+            Event(
+                id=None,
+                uuid="h3",
+                timestamp=now - timedelta(minutes=15),
+                session_id="test-session",
+                project_path="/test/project",
+                entry_type="tool_use",
+                tool_name="Bash",
+                command="git",
+            ),
+        ]
+        storage.add_events_batch(events)
+
+        result = get_handoff_context(storage, session_id="test-session")
+
+        assert result["session_id"] == "test-session"
+        assert result["project"] == "/test/project"
+        assert "duration_minutes" in result
+        assert result["total_events"] == 3
+
+    def test_returns_recent_messages(self, storage):
+        """Test that recent user messages are returned."""
+        from session_analytics.queries import get_handoff_context
+
+        now = datetime.now()
+        events = [
+            Event(
+                id=None,
+                uuid="m1",
+                timestamp=now - timedelta(hours=1),
+                session_id="msg-session",
+                entry_type="user",
+                user_message_text="First message",
+            ),
+            Event(
+                id=None,
+                uuid="m2",
+                timestamp=now - timedelta(minutes=30),
+                session_id="msg-session",
+                entry_type="user",
+                user_message_text="Second message",
+            ),
+        ]
+        storage.add_events_batch(events)
+
+        result = get_handoff_context(storage, session_id="msg-session", message_limit=5)
+
+        assert len(result["recent_messages"]) == 2
+        # Messages should be in reverse chronological order
+        assert "Second message" in result["recent_messages"][0]["message"]
+
+    def test_returns_modified_files(self, storage):
+        """Test that modified files are returned."""
+        from session_analytics.queries import get_handoff_context
+
+        now = datetime.now()
+        events = [
+            Event(
+                id=None,
+                uuid="f1",
+                timestamp=now - timedelta(hours=1),
+                session_id="file-session",
+                entry_type="tool_use",
+                tool_name="Edit",
+                file_path="/src/main.py",
+            ),
+            Event(
+                id=None,
+                uuid="f2",
+                timestamp=now - timedelta(minutes=30),
+                session_id="file-session",
+                entry_type="tool_use",
+                tool_name="Edit",
+                file_path="/src/main.py",
+            ),
+            Event(
+                id=None,
+                uuid="f3",
+                timestamp=now - timedelta(minutes=15),
+                session_id="file-session",
+                entry_type="tool_use",
+                tool_name="Write",
+                file_path="/src/new.py",
+            ),
+        ]
+        storage.add_events_batch(events)
+
+        result = get_handoff_context(storage, session_id="file-session")
+
+        assert len(result["modified_files"]) == 2
+        # Most edited file should be first
+        assert result["modified_files"][0]["file"] == "/src/main.py"
+        assert result["modified_files"][0]["touches"] == 2
+
+    def test_auto_selects_most_recent_session(self, storage):
+        """Test that most recent session is auto-selected."""
+        from session_analytics.queries import get_handoff_context
+
+        now = datetime.now()
+        events = [
+            Event(
+                id=None,
+                uuid="old1",
+                timestamp=now - timedelta(hours=2),
+                session_id="old-session",
+                entry_type="tool_use",
+                tool_name="Read",
+            ),
+            Event(
+                id=None,
+                uuid="new1",
+                timestamp=now - timedelta(minutes=10),
+                session_id="new-session",
+                entry_type="tool_use",
+                tool_name="Edit",
+            ),
+        ]
+        storage.add_events_batch(events)
+
+        result = get_handoff_context(storage, hours=4)
+
+        assert result["session_id"] == "new-session"
+
+
+class TestClassifySessions:
+    """Tests for classify_sessions function."""
+
+    def test_debugging_classification(self, storage):
+        """Test sessions with high error rate are classified as debugging."""
+        from session_analytics.queries import classify_sessions
+
+        now = datetime.now()
+        events = []
+        # Create session with >15% error rate (6 tools, 2 errors = 33%)
+        for i in range(6):
+            events.append(
+                Event(
+                    id=None,
+                    uuid=f"debug-tool-{i}",
+                    timestamp=now - timedelta(hours=1, minutes=i),
+                    session_id="debug-session",
+                    project_path="/debug/project",
+                    entry_type="tool_use",
+                    tool_name="Bash",
+                    tool_id=f"tool-{i}",
+                )
+            )
+        # Add 2 error results
+        for i in range(2):
+            events.append(
+                Event(
+                    id=None,
+                    uuid=f"debug-error-{i}",
+                    timestamp=now - timedelta(hours=1, minutes=i + 10),
+                    session_id="debug-session",
+                    project_path="/debug/project",
+                    entry_type="tool_result",
+                    tool_id=f"tool-{i}",
+                    is_error=True,
+                )
+            )
+        storage.add_events_batch(events)
+
+        result = classify_sessions(storage, days=7)
+
+        assert result["session_count"] >= 1
+        # Find debug-session in sessions
+        session = next(
+            (s for s in result["sessions"] if s["session_id"] == "debug-session"),
+            None,
+        )
+        assert session is not None
+        assert session["category"] == "debugging"
+
+    def test_development_classification(self, storage):
+        """Test sessions with high edit percentage are classified as development."""
+        from session_analytics.queries import classify_sessions
+
+        now = datetime.now()
+        events = []
+        # Create session with >30% Edit tools (4 Edits, 2 other = 67%)
+        for i in range(4):
+            events.append(
+                Event(
+                    id=None,
+                    uuid=f"dev-edit-{i}",
+                    timestamp=now - timedelta(hours=1, minutes=i),
+                    session_id="dev-session",
+                    project_path="/dev/project",
+                    entry_type="tool_use",
+                    tool_name="Edit",
+                    file_path=f"/file{i}.py",
+                )
+            )
+        events.extend(
+            [
+                Event(
+                    id=None,
+                    uuid="dev-read-1",
+                    timestamp=now - timedelta(hours=1, minutes=10),
+                    session_id="dev-session",
+                    project_path="/dev/project",
+                    entry_type="tool_use",
+                    tool_name="Read",
+                ),
+                Event(
+                    id=None,
+                    uuid="dev-bash-1",
+                    timestamp=now - timedelta(hours=1, minutes=11),
+                    session_id="dev-session",
+                    project_path="/dev/project",
+                    entry_type="tool_use",
+                    tool_name="Bash",
+                    command="ls",
+                ),
+            ]
+        )
+        storage.add_events_batch(events)
+
+        result = classify_sessions(storage, days=7)
+
+        session = next(
+            (s for s in result["sessions"] if s["session_id"] == "dev-session"),
+            None,
+        )
+        assert session is not None
+        assert session["category"] == "development"
+
+    def test_research_classification(self, storage):
+        """Test sessions with Read/search heavy usage are classified as research."""
+        from session_analytics.queries import classify_sessions
+
+        now = datetime.now()
+        events = []
+        # Create session with >40% Read+Grep+WebSearch (5 reads, 2 other = 71%)
+        for i in range(4):
+            events.append(
+                Event(
+                    id=None,
+                    uuid=f"research-read-{i}",
+                    timestamp=now - timedelta(hours=1, minutes=i),
+                    session_id="research-session",
+                    project_path="/research/project",
+                    entry_type="tool_use",
+                    tool_name="Read",
+                )
+            )
+        events.append(
+            Event(
+                id=None,
+                uuid="research-grep-1",
+                timestamp=now - timedelta(hours=1, minutes=5),
+                session_id="research-session",
+                project_path="/research/project",
+                entry_type="tool_use",
+                tool_name="Grep",
+            )
+        )
+        events.append(
+            Event(
+                id=None,
+                uuid="research-bash-1",
+                timestamp=now - timedelta(hours=1, minutes=6),
+                session_id="research-session",
+                project_path="/research/project",
+                entry_type="tool_use",
+                tool_name="Bash",
+                command="ls",
+            )
+        )
+        storage.add_events_batch(events)
+
+        result = classify_sessions(storage, days=7)
+
+        session = next(
+            (s for s in result["sessions"] if s["session_id"] == "research-session"),
+            None,
+        )
+        assert session is not None
+        assert session["category"] == "research"
+
+    def test_maintenance_classification(self, storage):
+        """Test sessions with git/build commands are classified as maintenance."""
+        from session_analytics.queries import classify_sessions
+
+        now = datetime.now()
+        events = []
+        # Create session with >50% git/gh/make commands (5 git, 1 other = 83%)
+        for i in range(5):
+            events.append(
+                Event(
+                    id=None,
+                    uuid=f"maint-git-{i}",
+                    timestamp=now - timedelta(hours=1, minutes=i),
+                    session_id="maint-session",
+                    project_path="/maint/project",
+                    entry_type="tool_use",
+                    tool_name="Bash",
+                    command="git",
+                )
+            )
+        events.append(
+            Event(
+                id=None,
+                uuid="maint-read-1",
+                timestamp=now - timedelta(hours=1, minutes=6),
+                session_id="maint-session",
+                project_path="/maint/project",
+                entry_type="tool_use",
+                tool_name="Read",
+            )
+        )
+        storage.add_events_batch(events)
+
+        result = classify_sessions(storage, days=7)
+
+        session = next(
+            (s for s in result["sessions"] if s["session_id"] == "maint-session"),
+            None,
+        )
+        assert session is not None
+        assert session["category"] == "maintenance"
+
+    def test_mixed_classification(self, storage):
+        """Test sessions without dominant patterns are classified as mixed."""
+        from session_analytics.queries import classify_sessions
+
+        now = datetime.now()
+        events = [
+            # Even mix of different activities - none dominant
+            Event(
+                id=None,
+                uuid="mixed-1",
+                timestamp=now - timedelta(hours=1, minutes=1),
+                session_id="mixed-session",
+                project_path="/mixed/project",
+                entry_type="tool_use",
+                tool_name="Read",
+            ),
+            Event(
+                id=None,
+                uuid="mixed-2",
+                timestamp=now - timedelta(hours=1, minutes=2),
+                session_id="mixed-session",
+                project_path="/mixed/project",
+                entry_type="tool_use",
+                tool_name="Edit",
+                file_path="/file.py",
+            ),
+            Event(
+                id=None,
+                uuid="mixed-3",
+                timestamp=now - timedelta(hours=1, minutes=3),
+                session_id="mixed-session",
+                project_path="/mixed/project",
+                entry_type="tool_use",
+                tool_name="Bash",
+                command="python",
+            ),
+            Event(
+                id=None,
+                uuid="mixed-4",
+                timestamp=now - timedelta(hours=1, minutes=4),
+                session_id="mixed-session",
+                project_path="/mixed/project",
+                entry_type="tool_use",
+                tool_name="Bash",
+                command="ls",
+            ),
+            Event(
+                id=None,
+                uuid="mixed-5",
+                timestamp=now - timedelta(hours=1, minutes=5),
+                session_id="mixed-session",
+                project_path="/mixed/project",
+                entry_type="tool_use",
+                tool_name="Write",
+                file_path="/new.txt",
+            ),
+        ]
+        storage.add_events_batch(events)
+
+        result = classify_sessions(storage, days=7)
+
+        session = next(
+            (s for s in result["sessions"] if s["session_id"] == "mixed-session"),
+            None,
+        )
+        assert session is not None
+        assert session["category"] == "mixed"
+
+    def test_project_filter(self, storage):
+        """Test that project filter correctly limits results."""
+        from session_analytics.queries import classify_sessions
+
+        now = datetime.now()
+        events = []
+        # Two different projects
+        for i in range(6):
+            events.append(
+                Event(
+                    id=None,
+                    uuid=f"proj-a-{i}",
+                    timestamp=now - timedelta(hours=1, minutes=i),
+                    session_id="proj-a-session",
+                    project_path="/project-alpha",
+                    entry_type="tool_use",
+                    tool_name="Edit",
+                )
+            )
+        for i in range(6):
+            events.append(
+                Event(
+                    id=None,
+                    uuid=f"proj-b-{i}",
+                    timestamp=now - timedelta(hours=2, minutes=i),
+                    session_id="proj-b-session",
+                    project_path="/project-beta",
+                    entry_type="tool_use",
+                    tool_name="Read",
+                )
+            )
+        storage.add_events_batch(events)
+
+        result = classify_sessions(storage, days=7, project="alpha")
+
+        assert result["session_count"] == 1
+        assert result["sessions"][0]["session_id"] == "proj-a-session"
+
+    def test_min_event_threshold(self, storage):
+        """Test that sessions with <5 events are excluded."""
+        from session_analytics.queries import classify_sessions
+
+        now = datetime.now()
+        events = [
+            # Only 3 events - should be excluded
+            Event(
+                id=None,
+                uuid="small-1",
+                timestamp=now - timedelta(hours=1),
+                session_id="small-session",
+                project_path="/small/project",
+                entry_type="tool_use",
+                tool_name="Read",
+            ),
+            Event(
+                id=None,
+                uuid="small-2",
+                timestamp=now - timedelta(hours=1, minutes=1),
+                session_id="small-session",
+                project_path="/small/project",
+                entry_type="tool_use",
+                tool_name="Edit",
+            ),
+            Event(
+                id=None,
+                uuid="small-3",
+                timestamp=now - timedelta(hours=1, minutes=2),
+                session_id="small-session",
+                project_path="/small/project",
+                entry_type="tool_use",
+                tool_name="Bash",
+                command="ls",
+            ),
+        ]
+        storage.add_events_batch(events)
+
+        result = classify_sessions(storage, days=7)
+
+        # Session with only 3 events should be excluded
+        assert result["session_count"] == 0
+
+
+class TestGetUserJourneyIncludeProjects:
+    """Test for get_user_journey with include_projects=False."""
+
+    def test_journey_without_projects(self, storage):
+        """Test that include_projects=False excludes project info."""
+        from session_analytics.queries import get_user_journey
+
+        now = datetime.now()
+        events = [
+            Event(
+                id=None,
+                uuid="np1",
+                timestamp=now - timedelta(hours=1),
+                session_id="s1",
+                project_path="project-a",
+                entry_type="user",
+                user_message_text="First message",
+            ),
+            Event(
+                id=None,
+                uuid="np2",
+                timestamp=now - timedelta(minutes=30),
+                session_id="s2",
+                project_path="project-b",
+                entry_type="user",
+                user_message_text="Second message",
+            ),
+        ]
+        storage.add_events_batch(events)
+
+        result = get_user_journey(storage, hours=24, include_projects=False)
+
+        assert result["message_count"] == 2
+        assert result["projects_visited"] is None
+        assert result["project_switches"] is None
+        for event in result["journey"]:
+            assert "project" not in event
