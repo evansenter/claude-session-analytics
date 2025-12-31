@@ -19,6 +19,7 @@ from pathlib import Path
 
 from fastmcp import FastMCP
 
+from session_analytics.ingest import ingest_logs as do_ingest_logs
 from session_analytics.storage import SQLiteStorage
 
 # Configure logging
@@ -78,13 +79,10 @@ def ingest_logs(days: int = 7, project: str | None = None, force: bool = False) 
     Returns:
         Ingestion stats (files processed, entries added, etc.)
     """
-    # Placeholder - will be implemented in Phase 3
+    result = do_ingest_logs(storage, days=days, project=project, force=force)
     return {
-        "status": "not_implemented",
-        "message": "Ingestion will be implemented in Phase 3",
-        "days": days,
-        "project": project,
-        "force": force,
+        "status": "ok",
+        **result,
     }
 
 

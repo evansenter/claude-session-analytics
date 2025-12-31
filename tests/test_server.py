@@ -14,11 +14,12 @@ def test_get_status():
     assert "session_count" in result
 
 
-def test_ingest_logs_placeholder():
-    """Test that ingest_logs returns placeholder response."""
-    result = ingest_logs.fn(days=7)
-    assert result["status"] == "not_implemented"
-    assert result["days"] == 7
+def test_ingest_logs():
+    """Test that ingest_logs runs and returns stats."""
+    result = ingest_logs.fn(days=1)
+    assert result["status"] == "ok"
+    assert "files_found" in result
+    assert "events_added" in result
 
 
 def test_query_tool_frequency_placeholder():
