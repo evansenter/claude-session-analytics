@@ -8,6 +8,7 @@ import pytest
 
 from session_analytics.storage import (
     Event,
+    GitCommit,
     IngestionState,
     Pattern,
     Session,
@@ -267,15 +268,54 @@ class TestDbStats:
         assert stats["db_path"] is not None
 
 
+class TestGitCommitValidation:
+    """Tests for GitCommit validation (RFC #17 Phase 1)."""
+
+    def test_valid_short_sha(self):
+        """Test that 7-character short SHA is valid."""
+        commit = GitCommit(sha="abc1234")
+        assert commit.sha == "abc1234"
+
+    def test_valid_full_sha(self):
+        """Test that 40-character full SHA is valid."""
+        full_sha = "a" * 40
+        commit = GitCommit(sha=full_sha)
+        assert commit.sha == full_sha
+
+    def test_invalid_sha_empty(self):
+        """Test that empty SHA raises ValueError."""
+        with pytest.raises(ValueError, match="cannot be empty"):
+            GitCommit(sha="")
+
+    def test_invalid_sha_too_short(self):
+        """Test that SHA shorter than 7 chars raises ValueError."""
+        with pytest.raises(ValueError, match="must be 7-40 characters"):
+            GitCommit(sha="abc123")
+
+    def test_invalid_sha_too_long(self):
+        """Test that SHA longer than 40 chars raises ValueError."""
+        with pytest.raises(ValueError, match="must be 7-40 characters"):
+            GitCommit(sha="a" * 41)
+
+    def test_invalid_sha_non_hex(self):
+        """Test that non-hexadecimal SHA raises ValueError."""
+        with pytest.raises(ValueError, match="must be hexadecimal"):
+            GitCommit(sha="ghijklm")
+
+    def test_gitcommit_is_frozen(self):
+        """Test that GitCommit is immutable."""
+        commit = GitCommit(sha="abc1234")
+        with pytest.raises(AttributeError):
+            commit.sha = "def5678"
+
+
 class TestGitCommitOperations:
     """Tests for git commit operations (RFC #17 Phase 1)."""
 
     def test_add_git_commit(self, storage):
         """Test adding a git commit."""
-        from session_analytics.storage import GitCommit
-
         commit = GitCommit(
-            sha="abc123",
+            sha="abc1234",
             timestamp=datetime.now(),
             message="Test commit",
             session_id="session-1",
@@ -285,17 +325,36 @@ class TestGitCommitOperations:
 
         commits = storage.get_git_commits()
         assert len(commits) == 1
-        assert commits[0].sha == "abc123"
+        assert commits[0].sha == "abc1234"
         assert commits[0].message == "Test commit"
+        assert commits[0].session_id == "session-1"
+        assert commits[0].project_path == "test-project"
+
+    def test_add_git_commit_deduplication(self, storage):
+        """Test that duplicate SHA overwrites existing commit (INSERT OR REPLACE behavior)."""
+        # Add initial commit
+        storage.add_git_commit(
+            GitCommit(sha="abc1234", message="Original message", project_path="project-1")
+        )
+
+        # Add commit with same SHA but different data
+        storage.add_git_commit(
+            GitCommit(sha="abc1234", message="Updated message", project_path="project-2")
+        )
+
+        # Should still have only one commit, with updated data
+        commits = storage.get_git_commits()
+        assert len(commits) == 1
+        assert commits[0].sha == "abc1234"
+        assert commits[0].message == "Updated message"
+        assert commits[0].project_path == "project-2"
 
     def test_add_git_commits_batch(self, storage):
         """Test batch adding git commits."""
-        from session_analytics.storage import GitCommit
-
         commits = [
-            GitCommit(sha="aaa111", timestamp=datetime.now(), message="Commit 1"),
-            GitCommit(sha="bbb222", timestamp=datetime.now(), message="Commit 2"),
-            GitCommit(sha="ccc333", timestamp=datetime.now(), message="Commit 3"),
+            GitCommit(sha="aaa1111", timestamp=datetime.now(), message="Commit 1"),
+            GitCommit(sha="bbb2222", timestamp=datetime.now(), message="Commit 2"),
+            GitCommit(sha="ccc3333", timestamp=datetime.now(), message="Commit 3"),
         ]
         count = storage.add_git_commits_batch(commits)
         assert count == 3
@@ -303,34 +362,48 @@ class TestGitCommitOperations:
         stored = storage.get_git_commits()
         assert len(stored) == 3
 
-    def test_get_git_commits_with_filters(self, storage):
-        """Test filtering git commits."""
-        from session_analytics.storage import GitCommit
+    def test_add_git_commits_batch_empty(self, storage):
+        """Test batch add with empty list."""
+        count = storage.add_git_commits_batch([])
+        assert count == 0
+        assert storage.get_git_commit_count() == 0
 
+    def test_get_git_commits_with_filters(self, storage):
+        """Test filtering git commits by project, start, and end time."""
         now = datetime.now()
         yesterday = now - timedelta(days=1)
+        two_days_ago = now - timedelta(days=2)
         commits = [
-            GitCommit(sha="old1", timestamp=yesterday, project_path="project-a"),
-            GitCommit(sha="new1", timestamp=now, project_path="project-a"),
-            GitCommit(sha="new2", timestamp=now, project_path="project-b"),
+            GitCommit(sha="aaa1111", timestamp=two_days_ago, project_path="project-a"),
+            GitCommit(sha="bbb2222", timestamp=yesterday, project_path="project-a"),
+            GitCommit(sha="ccc3333", timestamp=now, project_path="project-a"),
+            GitCommit(sha="ddd4444", timestamp=now, project_path="project-b"),
         ]
         storage.add_git_commits_batch(commits)
 
         # Filter by project
         project_a = storage.get_git_commits(project_path="project-a")
-        assert len(project_a) == 2
+        assert len(project_a) == 3
 
-        # Filter by time range
+        # Filter by start time
         recent = storage.get_git_commits(start=now - timedelta(hours=1))
         assert len(recent) == 2
 
+        # Filter by end time
+        old = storage.get_git_commits(end=yesterday + timedelta(hours=1))
+        assert len(old) == 2
+
+        # Combined filters: project AND time range
+        project_a_recent = storage.get_git_commits(
+            project_path="project-a", start=yesterday - timedelta(hours=1), end=now
+        )
+        assert len(project_a_recent) == 2  # mid1 and new1
+
     def test_git_commit_count(self, storage):
         """Test getting git commit count."""
-        from session_analytics.storage import GitCommit
-
         assert storage.get_git_commit_count() == 0
 
-        storage.add_git_commit(GitCommit(sha="test123"))
+        storage.add_git_commit(GitCommit(sha="abcdef1"))
         assert storage.get_git_commit_count() == 1
 
 
@@ -387,3 +460,20 @@ class TestNewEventFields:
         events = storage.get_events_in_range()
         assert events[0].user_message_text == "Run a command"
         assert events[0].exit_code == 0
+
+    def test_event_with_null_new_fields(self, storage):
+        """Test that events with NULL user_message_text and exit_code are handled correctly."""
+        event = Event(
+            id=None,
+            uuid="null-fields-uuid",
+            timestamp=datetime.now(),
+            session_id="session-1",
+            entry_type="assistant",
+            # user_message_text and exit_code are None by default
+        )
+        storage.add_event(event)
+
+        events = storage.get_events_in_range()
+        assert len(events) == 1
+        assert events[0].user_message_text is None
+        assert events[0].exit_code is None

@@ -107,15 +107,28 @@ class Pattern:
     computed_at: datetime | None = None
 
 
-@dataclass
+@dataclass(frozen=True)
 class GitCommit:
-    """A git commit for correlation with session activity."""
+    """A git commit for correlation with session activity.
+
+    Immutable dataclass representing a git commit. The SHA is validated
+    on construction to ensure it's a valid hexadecimal string.
+    """
 
     sha: str
     timestamp: datetime | None = None
     message: str | None = None
     session_id: str | None = None  # Inferred from timestamp proximity
     project_path: str | None = None
+
+    def __post_init__(self):
+        """Validate SHA format on construction."""
+        if not self.sha:
+            raise ValueError("SHA cannot be empty")
+        if not (7 <= len(self.sha) <= 40):
+            raise ValueError(f"SHA must be 7-40 characters, got {len(self.sha)}")
+        if not all(c in "0123456789abcdefABCDEF" for c in self.sha):
+            raise ValueError(f"SHA must be hexadecimal, got '{self.sha}'")
 
 
 # Default database path
