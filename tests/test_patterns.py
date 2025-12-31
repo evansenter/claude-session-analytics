@@ -237,9 +237,7 @@ class TestPermissionGaps:
         """Test loading allowed commands from settings.json."""
         with tempfile.TemporaryDirectory() as tmpdir:
             settings_path = Path(tmpdir) / "settings.json"
-            settings_path.write_text(
-                '{"permissions": {"allow": ["Bash(git:*)", "Bash(make:*)"]}}'
-            )
+            settings_path.write_text('{"permissions": {"allow": ["Bash(git:*)", "Bash(make:*)"]}}')
             allowed = load_allowed_commands(settings_path)
             assert "git" in allowed
             assert "make" in allowed

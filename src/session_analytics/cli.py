@@ -41,7 +41,9 @@ def format_output(data: dict, json_output: bool = False) -> str:
         # Session query result
         lines.append(f"Sessions: {data['session_count']}")
         lines.append(f"Total entries: {data['total_entries']}")
-        lines.append(f"Total tokens: {data.get('total_input_tokens', 0) + data.get('total_output_tokens', 0)}")
+        lines.append(
+            f"Total tokens: {data.get('total_input_tokens', 0) + data.get('total_output_tokens', 0)}"
+        )
 
     elif "breakdown" in data:
         lines.append(f"Token usage by {data.get('group_by', 'unknown')}:")
@@ -52,6 +54,14 @@ def format_output(data: dict, json_output: bool = False) -> str:
             key = item.get("day") or item.get("session_id") or item.get("model")
             lines.append(f"  {key}: {item['input_tokens']} in / {item['output_tokens']} out")
 
+    elif "summary" in data:
+        # get_insights output (has both summary and other keys)
+        lines.append("Insights summary:")
+        lines.append(f"  Tools: {data['summary']['total_tools']}")
+        lines.append(f"  Commands: {data['summary']['total_commands']}")
+        lines.append(f"  Sequences: {data['summary']['total_sequences']}")
+        lines.append(f"  Permission gaps: {data['summary']['permission_gaps_found']}")
+
     elif "sequences" in data:
         lines.append("Common tool sequences:")
         for seq in data.get("sequences", [])[:20]:
@@ -61,13 +71,6 @@ def format_output(data: dict, json_output: bool = False) -> str:
         lines.append("Permission gaps (consider adding to settings.json):")
         for gap in data.get("gaps", [])[:20]:
             lines.append(f"  {gap['command']}: {gap['count']} uses -> {gap['suggestion']}")
-
-    elif "summary" in data:
-        lines.append("Insights summary:")
-        lines.append(f"  Tools: {data['summary']['total_tools']}")
-        lines.append(f"  Commands: {data['summary']['total_commands']}")
-        lines.append(f"  Sequences: {data['summary']['total_sequences']}")
-        lines.append(f"  Permission gaps: {data['summary']['permission_gaps_found']}")
 
     elif "files_found" in data:
         lines.append(f"Files found: {data['files_found']}")
@@ -82,7 +85,9 @@ def format_output(data: dict, json_output: bool = False) -> str:
         lines.append(f"Sessions: {data['session_count']}")
         lines.append(f"Patterns: {data.get('pattern_count', 0)}")
         if data.get("earliest_event"):
-            lines.append(f"Date range: {data['earliest_event'][:10]} to {data['latest_event'][:10]}")
+            lines.append(
+                f"Date range: {data['earliest_event'][:10]} to {data['latest_event'][:10]}"
+            )
 
     else:
         return json.dumps(data, indent=2, default=str)
@@ -163,7 +168,11 @@ def cmd_permissions(args):
     result = {
         "days": args.days,
         "gaps": [
-            {"command": p.pattern_key, "count": p.count, "suggestion": p.metadata.get("suggestion", "")}
+            {
+                "command": p.pattern_key,
+                "count": p.count,
+                "suggestion": p.metadata.get("suggestion", ""),
+            }
             for p in patterns
         ],
     }
