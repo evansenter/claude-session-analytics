@@ -12,6 +12,9 @@ logger = logging.getLogger("session-analytics")
 # Default location for Claude Code session logs
 DEFAULT_LOGS_DIR = Path.home() / ".claude" / "projects"
 
+# Maximum length for user message text to prevent DB bloat while preserving context
+USER_MESSAGE_MAX_LENGTH = 2000
+
 
 def find_log_files(
     logs_dir: Path = DEFAULT_LOGS_DIR,
@@ -211,6 +214,21 @@ def parse_entry(raw: dict, project_path: str) -> list[Event]:
     elif entry_type == "user":
         content = message.get("content", "")
 
+        # Extract user message text for user journey tracking
+        user_message_text = None
+        if isinstance(content, str):
+            user_message_text = content[:USER_MESSAGE_MAX_LENGTH] if content else None
+        elif isinstance(content, list):
+            # Extract text from text blocks in the content list
+            text_parts = []
+            for item in content:
+                if isinstance(item, dict) and item.get("type") == "text":
+                    text_parts.append(item.get("text", ""))
+                elif isinstance(item, str):
+                    text_parts.append(item)
+            if text_parts:
+                user_message_text = " ".join(text_parts)[:USER_MESSAGE_MAX_LENGTH]
+
         # Check if content is a list with tool_result blocks
         if isinstance(content, list):
             tool_results = [
@@ -244,6 +262,7 @@ def parse_entry(raw: dict, project_path: str) -> list[Event]:
                         session_id=session_id,
                         project_path=project_path,
                         entry_type="user",
+                        user_message_text=user_message_text,
                         git_branch=git_branch,
                         cwd=cwd,
                     )
@@ -258,6 +277,7 @@ def parse_entry(raw: dict, project_path: str) -> list[Event]:
                     session_id=session_id,
                     project_path=project_path,
                     entry_type="user",
+                    user_message_text=user_message_text,
                     git_branch=git_branch,
                     cwd=cwd,
                 )

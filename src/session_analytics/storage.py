@@ -62,6 +62,14 @@ class Event:
     git_branch: str | None = None
     cwd: str | None = None
 
+    # RFC #17 Phase 1 additions
+    user_message_text: str | None = None  # For user journey tracking
+    # TODO(Phase 4): exit_code is not currently available in Claude Code JSONL format.
+    # The toolUseResult has stdout/stderr/interrupted but no exit code.
+    # This field is reserved for future extraction when format changes or
+    # we implement heuristic detection (e.g., stderr patterns, "Exit code: N" in output).
+    exit_code: int | None = None  # For failure detection (Bash commands)
+
 
 @dataclass
 class Session:
@@ -103,15 +111,46 @@ class Pattern:
     computed_at: datetime | None = None
 
 
+@dataclass(frozen=True)
+class GitCommit:
+    """A git commit for correlation with session activity.
+
+    Immutable dataclass representing a git commit. The SHA is validated
+    on construction to ensure it's a valid hexadecimal string.
+    """
+
+    sha: str
+    timestamp: datetime | None = None
+    message: str | None = None
+    session_id: str | None = None  # Inferred from timestamp proximity
+    project_path: str | None = None
+
+    def __post_init__(self):
+        """Validate SHA format on construction."""
+        if not self.sha:
+            raise ValueError("SHA cannot be empty")
+        if not (7 <= len(self.sha) <= 40):
+            raise ValueError(f"SHA must be 7-40 characters, got {len(self.sha)}")
+        if not all(c in "0123456789abcdefABCDEF" for c in self.sha):
+            raise ValueError(f"SHA must be hexadecimal, got '{self.sha}'")
+
+
 # Default database path
 DEFAULT_DB_PATH = Path.home() / ".claude" / "contrib" / "analytics" / "data.db"
 
 # Schema version for migrations
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 3
 
 # Migration functions: dict of version -> (migration_name, migration_func)
 # Each migration upgrades FROM version-1 TO version
 # e.g., MIGRATIONS[2] upgrades from version 1 to version 2
+#
+# NOTE: Schema elements (tables, indexes, triggers) are defined in BOTH migrations
+# AND _init_db(). This is intentional:
+# - _init_db() defines the complete current schema for fresh installs
+# - Migrations incrementally upgrade existing databases to the current schema
+# Both paths must result in identical schemas. When adding new schema elements,
+# add them to both places and use IF NOT EXISTS for idempotency.
 MIGRATIONS: dict[int, tuple[str, callable]] = {}
 
 
@@ -125,11 +164,87 @@ def migration(version: int, name: str):
     return decorator
 
 
-# Example migration (commented out, uncomment when needed):
-# @migration(2, "add_example_column")
-# def migrate_v2(conn):
-#     """Add example column to events table."""
-#     conn.execute("ALTER TABLE events ADD COLUMN example TEXT")
+@migration(2, "add_rfc17_phase1_columns")
+def migrate_v2(conn):
+    """Add columns for RFC #17 Phase 1: user_message_text, exit_code, and git_commits table."""
+    # Check if columns already exist (for fresh installs that already have them)
+    existing_cols = {row[1] for row in conn.execute("PRAGMA table_info(events)")}
+
+    # Add user_message_text for user journey tracking
+    if "user_message_text" not in existing_cols:
+        conn.execute("ALTER TABLE events ADD COLUMN user_message_text TEXT")
+    # Add exit_code for failure detection
+    if "exit_code" not in existing_cols:
+        conn.execute("ALTER TABLE events ADD COLUMN exit_code INTEGER")
+
+    # Create git_commits table for git correlation
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS git_commits (
+            sha TEXT PRIMARY KEY,
+            timestamp TIMESTAMP,
+            message TEXT,
+            session_id TEXT,
+            project_path TEXT
+        )
+    """)
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_git_commits_timestamp ON git_commits(timestamp)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_git_commits_session ON git_commits(session_id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_git_commits_project ON git_commits(project_path)")
+
+
+@migration(3, "add_user_message_fts")
+def migrate_v3(conn):
+    """Add FTS5 full-text search index on user_message_text for efficient text search."""
+    # Create FTS5 virtual table (content= points to external events table)
+    # Using content-less FTS (no redundant storage) with events.id as rowid
+    conn.execute("""
+        CREATE VIRTUAL TABLE IF NOT EXISTS events_fts USING fts5(
+            user_message_text,
+            content='events',
+            content_rowid='id'
+        )
+    """)
+
+    # Populate FTS index from existing events with non-null user_message_text
+    conn.execute("""
+        INSERT INTO events_fts(rowid, user_message_text)
+        SELECT id, user_message_text FROM events WHERE user_message_text IS NOT NULL
+    """)
+
+    # Create triggers to keep FTS in sync with events table
+    conn.execute("""
+        CREATE TRIGGER IF NOT EXISTS events_fts_insert AFTER INSERT ON events
+        WHEN NEW.user_message_text IS NOT NULL
+        BEGIN
+            INSERT INTO events_fts(rowid, user_message_text) VALUES (NEW.id, NEW.user_message_text);
+        END
+    """)
+
+    conn.execute("""
+        CREATE TRIGGER IF NOT EXISTS events_fts_delete AFTER DELETE ON events
+        WHEN OLD.user_message_text IS NOT NULL
+        BEGIN
+            INSERT INTO events_fts(events_fts, rowid, user_message_text)
+            VALUES ('delete', OLD.id, OLD.user_message_text);
+        END
+    """)
+
+    conn.execute("""
+        CREATE TRIGGER IF NOT EXISTS events_fts_update AFTER UPDATE OF user_message_text ON events
+        WHEN OLD.user_message_text IS NOT NULL OR NEW.user_message_text IS NOT NULL
+        BEGIN
+            INSERT INTO events_fts(events_fts, rowid, user_message_text)
+            SELECT 'delete', OLD.id, OLD.user_message_text WHERE OLD.user_message_text IS NOT NULL;
+            INSERT INTO events_fts(rowid, user_message_text)
+            SELECT NEW.id, NEW.user_message_text WHERE NEW.user_message_text IS NOT NULL;
+        END
+    """)
+
+    # Partial index for efficiently querying events with user messages
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_events_has_user_message
+        ON events(id) WHERE user_message_text IS NOT NULL
+    """)
 
 
 class SQLiteStorage:
@@ -254,6 +369,10 @@ class SQLiteStorage:
                     git_branch TEXT,
                     cwd TEXT,
 
+                    -- RFC #17 Phase 1 additions
+                    user_message_text TEXT,
+                    exit_code INTEGER,
+
                     UNIQUE(session_id, uuid)
                 )
             """)
@@ -305,6 +424,70 @@ class SQLiteStorage:
                 )
             """)
 
+            # Git commits for correlation (RFC #17 Phase 1)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS git_commits (
+                    sha TEXT PRIMARY KEY,
+                    timestamp TIMESTAMP,
+                    message TEXT,
+                    session_id TEXT,
+                    project_path TEXT
+                )
+            """)
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_git_commits_timestamp ON git_commits(timestamp)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_git_commits_session ON git_commits(session_id)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_git_commits_project ON git_commits(project_path)"
+            )
+
+            # FTS5 full-text search on user_message_text (RFC #17 Phase 1)
+            conn.execute("""
+                CREATE VIRTUAL TABLE IF NOT EXISTS events_fts USING fts5(
+                    user_message_text,
+                    content='events',
+                    content_rowid='id'
+                )
+            """)
+
+            # Triggers to keep FTS in sync with events table
+            conn.execute("""
+                CREATE TRIGGER IF NOT EXISTS events_fts_insert AFTER INSERT ON events
+                WHEN NEW.user_message_text IS NOT NULL
+                BEGIN
+                    INSERT INTO events_fts(rowid, user_message_text) VALUES (NEW.id, NEW.user_message_text);
+                END
+            """)
+
+            conn.execute("""
+                CREATE TRIGGER IF NOT EXISTS events_fts_delete AFTER DELETE ON events
+                WHEN OLD.user_message_text IS NOT NULL
+                BEGIN
+                    INSERT INTO events_fts(events_fts, rowid, user_message_text)
+                    VALUES ('delete', OLD.id, OLD.user_message_text);
+                END
+            """)
+
+            conn.execute("""
+                CREATE TRIGGER IF NOT EXISTS events_fts_update AFTER UPDATE OF user_message_text ON events
+                WHEN OLD.user_message_text IS NOT NULL OR NEW.user_message_text IS NOT NULL
+                BEGIN
+                    INSERT INTO events_fts(events_fts, rowid, user_message_text)
+                    SELECT 'delete', OLD.id, OLD.user_message_text WHERE OLD.user_message_text IS NOT NULL;
+                    INSERT INTO events_fts(rowid, user_message_text)
+                    SELECT NEW.id, NEW.user_message_text WHERE NEW.user_message_text IS NOT NULL;
+                END
+            """)
+
+            # Partial index for efficiently querying events with user messages
+            conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_events_has_user_message
+                ON events(id) WHERE user_message_text IS NOT NULL
+            """)
+
             # Run any pending migrations
             current_version = self._get_schema_version(conn)
             if current_version < SCHEMA_VERSION:
@@ -322,8 +505,8 @@ class SQLiteStorage:
                     tool_name, tool_input_json, tool_id, is_error,
                     command, command_args, file_path, skill_name,
                     input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens, model,
-                    git_branch, cwd
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    git_branch, cwd, user_message_text, exit_code
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     event.uuid,
@@ -346,6 +529,8 @@ class SQLiteStorage:
                     event.model,
                     event.git_branch,
                     event.cwd,
+                    event.user_message_text,
+                    event.exit_code,
                 ),
             )
             event.id = cursor.lastrowid
@@ -361,8 +546,8 @@ class SQLiteStorage:
                     tool_name, tool_input_json, tool_id, is_error,
                     command, command_args, file_path, skill_name,
                     input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens, model,
-                    git_branch, cwd
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    git_branch, cwd, user_message_text, exit_code
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 [
                     (
@@ -386,6 +571,8 @@ class SQLiteStorage:
                         e.model,
                         e.git_branch,
                         e.cwd,
+                        e.user_message_text,
+                        e.exit_code,
                     )
                     for e in events
                 ],
@@ -424,6 +611,7 @@ class SQLiteStorage:
                 conditions.append("project_path = ?")
                 params.append(project_path)
 
+            # Safe: where_clause is built from hardcoded condition strings, not user input
             where_clause = " AND ".join(conditions) if conditions else "1=1"
             params.append(limit)
 
@@ -441,6 +629,14 @@ class SQLiteStorage:
 
     def _row_to_event(self, row: sqlite3.Row) -> Event:
         """Convert a database row to an Event object."""
+
+        # Helper to safely get column that might not exist in older schema
+        def get_col(name: str, default=None):
+            try:
+                return row[name]
+            except (IndexError, KeyError):
+                return default
+
         return Event(
             id=row["id"],
             uuid=row["uuid"],
@@ -463,6 +659,8 @@ class SQLiteStorage:
             model=row["model"],
             git_branch=row["git_branch"],
             cwd=row["cwd"],
+            user_message_text=get_col("user_message_text"),
+            exit_code=get_col("exit_code"),
         )
 
     # Session operations
@@ -626,6 +824,120 @@ class SQLiteStorage:
                 cursor = conn.execute("DELETE FROM patterns")
             return cursor.rowcount
 
+    # Git commit operations (RFC #17 Phase 1)
+
+    def add_git_commit(self, commit: GitCommit) -> None:
+        """Add a git commit for correlation."""
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO git_commits (
+                    sha, timestamp, message, session_id, project_path
+                ) VALUES (?, ?, ?, ?, ?)
+                """,
+                (
+                    commit.sha,
+                    commit.timestamp,
+                    commit.message,
+                    commit.session_id,
+                    commit.project_path,
+                ),
+            )
+
+    def add_git_commits_batch(self, commits: list[GitCommit]) -> int:
+        """Add multiple git commits in a single transaction. Returns count added."""
+        with self._connect() as conn:
+            cursor = conn.executemany(
+                """
+                INSERT OR REPLACE INTO git_commits (
+                    sha, timestamp, message, session_id, project_path
+                ) VALUES (?, ?, ?, ?, ?)
+                """,
+                [(c.sha, c.timestamp, c.message, c.session_id, c.project_path) for c in commits],
+            )
+            return cursor.rowcount
+
+    def get_git_commits(
+        self,
+        project_path: str | None = None,
+        start: datetime | None = None,
+        end: datetime | None = None,
+        limit: int = 100,
+    ) -> list[GitCommit]:
+        """Get git commits, optionally filtered by project and time range."""
+        with self._connect() as conn:
+            conditions = []
+            params: list = []
+
+            if project_path:
+                conditions.append("project_path = ?")
+                params.append(project_path)
+            if start:
+                conditions.append("timestamp >= ?")
+                params.append(start)
+            if end:
+                conditions.append("timestamp <= ?")
+                params.append(end)
+
+            # Safe: where_clause is built from hardcoded condition strings, not user input
+            where_clause = " AND ".join(conditions) if conditions else "1=1"
+            params.append(limit)
+
+            rows = conn.execute(
+                f"""
+                SELECT sha, timestamp, message, session_id, project_path
+                FROM git_commits
+                WHERE {where_clause}
+                ORDER BY timestamp DESC
+                LIMIT ?
+                """,
+                params,
+            ).fetchall()
+
+            return [
+                GitCommit(
+                    sha=row["sha"],
+                    timestamp=row["timestamp"],
+                    message=row["message"],
+                    session_id=row["session_id"],
+                    project_path=row["project_path"],
+                )
+                for row in rows
+            ]
+
+    def get_git_commit_count(self) -> int:
+        """Get total number of git commits."""
+        with self._connect() as conn:
+            row = conn.execute("SELECT COUNT(*) as count FROM git_commits").fetchone()
+            return row["count"]
+
+    # Full-text search operations
+
+    def search_user_messages(self, query: str, limit: int = 100) -> list[Event]:
+        """Search user messages using full-text search.
+
+        Args:
+            query: FTS5 query string (supports AND, OR, NOT, phrases, etc.)
+            limit: Maximum number of results
+
+        Returns:
+            List of Event objects matching the search query
+        """
+        with self._connect() as conn:
+            # Use FTS5 MATCH to search, join back to events for full data
+            rows = conn.execute(
+                """
+                SELECT events.* FROM events
+                INNER JOIN events_fts ON events.id = events_fts.rowid
+                WHERE events_fts MATCH ?
+                ORDER BY rank
+                LIMIT ?
+                """,
+                (query, limit),
+            ).fetchall()
+
+            return [self._row_to_event(row) for row in rows]
+
     # Utility operations
 
     def get_db_stats(self) -> dict:
@@ -635,6 +947,12 @@ class SQLiteStorage:
             session_count = conn.execute("SELECT COUNT(*) FROM sessions").fetchone()[0]
             pattern_count = conn.execute("SELECT COUNT(*) FROM patterns").fetchone()[0]
             file_count = conn.execute("SELECT COUNT(*) FROM ingestion_state").fetchone()[0]
+
+            # Git commit count (may not exist in older schemas)
+            try:
+                git_commit_count = conn.execute("SELECT COUNT(*) FROM git_commits").fetchone()[0]
+            except sqlite3.OperationalError:
+                git_commit_count = 0
 
             # Get date range
             date_range = conn.execute(
@@ -654,6 +972,7 @@ class SQLiteStorage:
                 "event_count": event_count,
                 "session_count": session_count,
                 "pattern_count": pattern_count,
+                "git_commit_count": git_commit_count,
                 "files_processed": file_count,
                 "earliest_event": to_iso(date_range["min_ts"]),
                 "latest_event": to_iso(date_range["max_ts"]),
