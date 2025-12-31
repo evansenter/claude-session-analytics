@@ -575,3 +575,113 @@ class TestFullTextSearch:
         results = storage.search_user_messages('"unit tests"')
         assert len(results) == 1
         assert "unit tests" in results[0].user_message_text.lower()
+
+
+class TestFTSTriggers:
+    """Tests for FTS trigger behavior on insert/update/delete."""
+
+    def test_fts_trigger_on_insert(self, storage):
+        """Test that FTS index is updated on insert."""
+        storage.add_event(
+            Event(
+                id=None,
+                uuid="insert-test",
+                timestamp=datetime.now(),
+                session_id="session-1",
+                entry_type="user",
+                user_message_text="searchable insert content",
+            )
+        )
+
+        # Verify FTS finds the inserted content
+        results = storage.search_user_messages("searchable")
+        assert len(results) == 1
+        assert results[0].uuid == "insert-test"
+
+    def test_fts_trigger_on_update_null_to_value(self, storage):
+        """Test FTS trigger handles NULL -> non-NULL update correctly."""
+        # Insert event without user_message_text
+        storage.add_event(
+            Event(
+                id=None,
+                uuid="update-null-test",
+                timestamp=datetime.now(),
+                session_id="session-1",
+                entry_type="user",
+                user_message_text=None,
+            )
+        )
+
+        # Verify not in FTS
+        results = storage.search_user_messages("updated")
+        assert len(results) == 0
+
+        # Update to add user_message_text
+        storage.execute_write(
+            "UPDATE events SET user_message_text = ? WHERE uuid = ?",
+            ("updated content here", "update-null-test"),
+        )
+
+        # Verify FTS now finds it
+        results = storage.search_user_messages("updated")
+        assert len(results) == 1
+        assert results[0].uuid == "update-null-test"
+
+    def test_fts_trigger_on_update_value_to_different(self, storage):
+        """Test FTS trigger handles value -> different value update correctly."""
+        storage.add_event(
+            Event(
+                id=None,
+                uuid="update-value-test",
+                timestamp=datetime.now(),
+                session_id="session-1",
+                entry_type="user",
+                user_message_text="original searchterm",
+            )
+        )
+
+        # Verify original is searchable
+        results = storage.search_user_messages("original")
+        assert len(results) == 1
+
+        # Update to different value
+        storage.execute_write(
+            "UPDATE events SET user_message_text = ? WHERE uuid = ?",
+            ("replacement searchterm", "update-value-test"),
+        )
+
+        # Old value should not be found
+        results = storage.search_user_messages("original")
+        assert len(results) == 0
+
+        # New value should be found
+        results = storage.search_user_messages("replacement")
+        assert len(results) == 1
+        assert results[0].uuid == "update-value-test"
+
+    def test_fts_trigger_on_update_value_to_null(self, storage):
+        """Test FTS trigger handles non-NULL -> NULL update correctly."""
+        storage.add_event(
+            Event(
+                id=None,
+                uuid="update-to-null-test",
+                timestamp=datetime.now(),
+                session_id="session-1",
+                entry_type="user",
+                user_message_text="removable content",
+            )
+        )
+
+        # Verify in FTS
+        results = storage.search_user_messages("removable")
+        assert len(results) == 1
+
+        # Update to NULL
+        storage.execute_write(
+            "UPDATE events SET user_message_text = NULL WHERE uuid = ?",
+            ("update-to-null-test",),
+        )
+
+        # Should no longer be in FTS
+        results = storage.search_user_messages("removable")
+        assert len(results) == 0

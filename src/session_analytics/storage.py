@@ -144,6 +144,13 @@ SCHEMA_VERSION = 3
 # Migration functions: dict of version -> (migration_name, migration_func)
 # Each migration upgrades FROM version-1 TO version
 # e.g., MIGRATIONS[2] upgrades from version 1 to version 2
+#
+# NOTE: Schema elements (tables, indexes, triggers) are defined in BOTH migrations
+# AND _init_db(). This is intentional:
+# - _init_db() defines the complete current schema for fresh installs
+# - Migrations incrementally upgrade existing databases to the current schema
+# Both paths must result in identical schemas. When adding new schema elements,
+# add them to both places and use IF NOT EXISTS for idempotency.
 MIGRATIONS: dict[int, tuple[str, callable]] = {}
 
 
