@@ -82,17 +82,26 @@ Do this:
 | `get_status` | Database stats and last ingestion time |
 | `ingest_logs` | Refresh data from JSONL files |
 | `query_tool_frequency` | Tool usage counts (Read, Edit, Bash, etc.) |
-| `query_timeline` | Events in time window with filtering |
+| `query_timeline` | Events in time window (supports `session_id` filter) |
 | `query_commands` | Bash command breakdown with prefix filter |
-| `query_sessions` | Session metadata and token totals |
+| `query_sessions` | Session metadata and token totals (lists all session IDs) |
 | `query_tokens` | Token usage by day, session, or model |
-| `query_sequences` | Common tool patterns (n-grams) |
+| `query_sequences` | Common tool patterns (n-grams, `length` param for n-gram size) |
 | `query_permission_gaps` | Commands needing settings.json entries |
 | `get_insights` | Pre-computed patterns for /improve-workflow |
-| `get_user_journey` | User messages across sessions chronologically |
+| `get_user_journey` | User messages across sessions (supports `session_id` filter) |
 | `search_messages` | Full-text search on user messages (FTS5) |
 | `get_session_signals` | Raw session metrics for LLM interpretation (RFC #26) |
 | `get_session_commits` | Session-commit mappings with timing (RFC #26) |
+
+### Session Discovery and Drill-In Flow
+
+1. **Discover sessions**: `query_sessions()` returns all session IDs with basic metadata
+2. **Get signals**: `get_session_signals()` returns raw metrics (error_rate, commit_count, etc.)
+3. **Drill into session**:
+   - `query_timeline(session_id=<id>)` - get full event trace
+   - `get_user_journey(session_id=<id>)` - get all user messages
+   - `get_session_commits(session_id=<id>)` - get commit associations
 
 ## CLI Commands
 

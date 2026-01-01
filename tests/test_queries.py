@@ -189,6 +189,13 @@ class TestQueryTimeline:
             assert ts >= start
             assert ts <= end
 
+    def test_timeline_with_session_id_filter(self, populated_storage):
+        """Test timeline with session_id filter."""
+        result = query_timeline(populated_storage, session_id="session-1", limit=100)
+        assert result["session_id"] == "session-1"
+        for event in result["events"]:
+            assert event["session_id"] == "session-1"
+
 
 class TestQueryCommands:
     """Tests for command queries."""
@@ -370,6 +377,42 @@ class TestGetUserJourney:
 
         # Should only have the user message, not the tool use
         assert result["message_count"] == 1
+
+    def test_journey_with_session_id_filter(self, storage):
+        """Test get_user_journey with session_id filter."""
+        from session_analytics.queries import get_user_journey
+
+        now = datetime.now()
+        # Add user messages from two different sessions
+        storage.add_event(
+            Event(
+                id=None,
+                uuid="journey-1",
+                timestamp=now - timedelta(hours=1),
+                session_id="session-target",
+                project_path="project-a",
+                entry_type="user",
+                user_message_text="Message from target session",
+            )
+        )
+        storage.add_event(
+            Event(
+                id=None,
+                uuid="journey-2",
+                timestamp=now - timedelta(hours=1),
+                session_id="session-other",
+                project_path="project-a",
+                entry_type="user",
+                user_message_text="Message from other session",
+            )
+        )
+
+        # Filter to only target session
+        result = get_user_journey(storage, hours=24, session_id="session-target")
+
+        assert result["session_id"] == "session-target"
+        assert result["message_count"] == 1
+        assert result["journey"][0]["session_id"] == "session-target"
 
 
 class TestDetectParallelSessions:

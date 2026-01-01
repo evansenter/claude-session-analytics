@@ -124,6 +124,45 @@ class TestEventOperations:
         assert len(bash_events) == 1
         assert bash_events[0].tool_name == "Bash"
 
+    def test_get_events_by_session_id(self, storage):
+        """Test filtering events by session ID."""
+        # Add events from different sessions
+        storage.add_event(
+            Event(
+                id=None,
+                uuid="uuid-1",
+                timestamp=datetime.now(),
+                session_id="session-alpha",
+                tool_name="Bash",
+            )
+        )
+        storage.add_event(
+            Event(
+                id=None,
+                uuid="uuid-2",
+                timestamp=datetime.now(),
+                session_id="session-alpha",
+                tool_name="Read",
+            )
+        )
+        storage.add_event(
+            Event(
+                id=None,
+                uuid="uuid-3",
+                timestamp=datetime.now(),
+                session_id="session-beta",
+                tool_name="Edit",
+            )
+        )
+
+        # Filter by session
+        alpha_events = storage.get_events_in_range(session_id="session-alpha")
+        assert len(alpha_events) == 2
+
+        beta_events = storage.get_events_in_range(session_id="session-beta")
+        assert len(beta_events) == 1
+        assert beta_events[0].session_id == "session-beta"
+
 
 class TestSessionOperations:
     """Tests for session CRUD operations."""

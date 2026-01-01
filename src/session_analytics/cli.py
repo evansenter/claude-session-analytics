@@ -554,6 +554,7 @@ def cmd_journey(args):
         storage,
         hours=args.hours,
         include_projects=not args.no_projects,
+        session_id=getattr(args, "session_id", None),
         limit=args.limit,
     )
     print(format_output(result, args.json))
@@ -837,6 +838,7 @@ Data location: ~/.claude/contrib/analytics/data.db
     sub.add_argument("--hours", type=int, default=24, help="Hours to look back (default: 24)")
     sub.add_argument("--limit", type=int, default=100, help="Max messages (default: 100)")
     sub.add_argument("--no-projects", action="store_true", help="Exclude project info")
+    sub.add_argument("--session-id", help="Filter to specific session ID")
     sub.set_defaults(func=cmd_journey)
 
     # search
@@ -913,7 +915,7 @@ Data location: ~/.claude/contrib/analytics/data.db
     sub = subparsers.add_parser("signals", help="Show raw session signals for LLM interpretation")
     sub.add_argument("--days", type=int, default=7, help="Days to analyze (default: 7)")
     sub.add_argument(
-        "--min-events", type=int, default=5, help="Min events per session (default: 5)"
+        "--min-events", type=int, default=1, help="Min events per session (default: 1)"
     )
     sub.add_argument("--project", help="Project path filter")
     sub.set_defaults(func=cmd_signals)

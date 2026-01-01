@@ -137,6 +137,7 @@ def query_timeline(
     end: datetime | None = None,
     tool: str | None = None,
     project: str | None = None,
+    session_id: str | None = None,
     limit: int = 100,
 ) -> dict:
     """Get events in a time window.
@@ -147,6 +148,7 @@ def query_timeline(
         end: End of time window (default: now)
         tool: Optional tool name filter
         project: Optional project path filter
+        session_id: Optional session ID filter (get full session trace)
         limit: Maximum events to return
 
     Returns:
@@ -162,6 +164,7 @@ def query_timeline(
         end=end,
         tool_name=tool,
         project_path=project,
+        session_id=session_id,
         limit=limit,
     )
 
@@ -170,6 +173,7 @@ def query_timeline(
         "end": end.isoformat(),
         "tool": tool,
         "project": project,
+        "session_id": session_id,
         "count": len(events),
         "events": [
             {
@@ -459,6 +463,7 @@ def get_user_journey(
     storage: SQLiteStorage,
     hours: int = 24,
     include_projects: bool = True,
+    session_id: str | None = None,
     limit: int = 100,
 ) -> dict:
     """Get all user messages chronologically across sessions.
@@ -470,6 +475,7 @@ def get_user_journey(
         storage: Storage instance
         hours: Number of hours to look back (default: 24)
         include_projects: Include project info in output (default: True)
+        session_id: Optional session ID filter (get messages from specific session)
         limit: Maximum messages to return (default: 100)
 
     Returns:
@@ -477,9 +483,17 @@ def get_user_journey(
     """
     cutoff = datetime.now() - timedelta(hours=hours)
 
+    # Build query with optional session_id filter
+    session_filter = ""
+    params: list = [cutoff]
+    if session_id:
+        session_filter = "AND session_id = ?"
+        params.append(session_id)
+    params.append(limit)
+
     # Query user messages ordered by timestamp
     rows = storage.execute_query(
-        """
+        f"""
         SELECT
             timestamp,
             session_id,
@@ -489,10 +503,11 @@ def get_user_journey(
         WHERE timestamp >= ?
           AND entry_type = 'user'
           AND user_message_text IS NOT NULL
+          {session_filter}
         ORDER BY timestamp ASC
         LIMIT ?
         """,
-        (cutoff, limit),
+        tuple(params),
     )
 
     # Build journey events
@@ -520,6 +535,7 @@ def get_user_journey(
 
     return {
         "hours": hours,
+        "session_id": session_id,
         "message_count": len(journey),
         "projects_visited": list(projects_seen) if include_projects else None,
         "project_switches": project_switches if include_projects else None,

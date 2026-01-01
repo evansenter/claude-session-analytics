@@ -674,6 +674,7 @@ class SQLiteStorage:
         end: datetime | None = None,
         tool_name: str | None = None,
         project_path: str | None = None,
+        session_id: str | None = None,
         limit: int = 100,
     ) -> list[Event]:
         """Get events within a time range with optional filters."""
@@ -693,6 +694,9 @@ class SQLiteStorage:
             if project_path:
                 conditions.append("project_path = ?")
                 params.append(project_path)
+            if session_id:
+                conditions.append("session_id = ?")
+                params.append(session_id)
 
             # Safe: where_clause is built from hardcoded condition strings, not user input
             where_clause = " AND ".join(conditions) if conditions else "1=1"

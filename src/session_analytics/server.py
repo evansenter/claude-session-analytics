@@ -120,6 +120,7 @@ def query_timeline(
     end: str | None = None,
     tool: str | None = None,
     project: str | None = None,
+    session_id: str | None = None,
     limit: int = 100,
 ) -> dict:
     """Get events in a time window.
@@ -129,6 +130,7 @@ def query_timeline(
         end: End time (ISO format, default: now)
         tool: Optional tool name filter
         project: Optional project path filter
+        session_id: Optional session ID filter (get full session trace)
         limit: Maximum events to return (default: 100)
 
     Returns:
@@ -141,7 +143,13 @@ def query_timeline(
 
     queries.ensure_fresh_data(storage)
     result = queries.query_timeline(
-        storage, start=start_dt, end=end_dt, tool=tool, project=project, limit=limit
+        storage,
+        start=start_dt,
+        end=end_dt,
+        tool=tool,
+        project=project,
+        session_id=session_id,
+        limit=limit,
     )
     return {"status": "ok", **result}
 
@@ -273,7 +281,12 @@ def query_permission_gaps(days: int = 7, threshold: int = 5) -> dict:
 
 
 @mcp.tool()
-def get_user_journey(hours: int = 24, include_projects: bool = True, limit: int = 100) -> dict:
+def get_user_journey(
+    hours: int = 24,
+    include_projects: bool = True,
+    session_id: str | None = None,
+    limit: int = 100,
+) -> dict:
     """Get all user messages chronologically across sessions.
 
     Shows how the user moved across sessions and projects over time,
@@ -282,6 +295,7 @@ def get_user_journey(hours: int = 24, include_projects: bool = True, limit: int 
     Args:
         hours: Number of hours to look back (default: 24)
         include_projects: Include project info in output (default: True)
+        session_id: Optional session ID filter (get messages from specific session)
         limit: Maximum messages to return (default: 100)
 
     Returns:
@@ -289,7 +303,11 @@ def get_user_journey(hours: int = 24, include_projects: bool = True, limit: int 
     """
     queries.ensure_fresh_data(storage, days=max(1, hours // 24 + 1))
     result = queries.get_user_journey(
-        storage, hours=hours, include_projects=include_projects, limit=limit
+        storage,
+        hours=hours,
+        include_projects=include_projects,
+        session_id=session_id,
+        limit=limit,
     )
     return {"status": "ok", **result}
 
@@ -530,7 +548,7 @@ def correlate_git_with_sessions(days: int = 7) -> dict:
 
 
 @mcp.tool()
-def get_session_signals(days: int = 7, min_events: int = 5) -> dict:
+def get_session_signals(days: int = 7, min_events: int = 1) -> dict:
     """Get raw session signals for LLM interpretation.
 
     RFC #26 (revised per RFC #17 principle): Extracts observable session data
@@ -543,7 +561,7 @@ def get_session_signals(days: int = 7, min_events: int = 5) -> dict:
 
     Args:
         days: Number of days to analyze (default: 7)
-        min_events: Minimum events for a session to be included (default: 5)
+        min_events: Minimum events for a session to be included (default: 1)
 
     Returns:
         Raw session signals for LLM interpretation
