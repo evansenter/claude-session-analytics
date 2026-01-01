@@ -27,6 +27,28 @@ Key components:
 - **Auto-refresh** queries automatically refresh stale data (>5 min old)
 - **LaunchAgent** for always-on availability (macOS)
 
+---
+
+## ⚠️ DATABASE PROTECTION - READ THIS ⚠️
+
+**The database at `~/.claude/contrib/analytics/data.db` contains irreplaceable historical data.**
+
+### NEVER do any of the following:
+- Add code that deletes the database file (`os.remove()`, `unlink()`, `rm`)
+- Add `DROP TABLE` statements for `events`, `sessions`, `ingested_files`, or `git_commits`
+- Add `DELETE FROM` for user data tables (only `patterns` table can be cleared - it's re-computed)
+- Add any "reset" or "clear all" functionality that destroys historical data
+
+### Safe operations:
+- `DELETE FROM patterns` - OK, patterns are re-computed derived data
+- `make uninstall` - OK, preserves database (only removes LaunchAgent + MCP config)
+- `make reinstall` - OK, just reinstalls Python package
+
+### If you need to test destructive operations:
+Use a temporary database in tests (all tests already do this via `tmpdir`).
+
+---
+
 ## Commands
 
 ```bash
