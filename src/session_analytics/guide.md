@@ -91,6 +91,42 @@ query_tool_frequency(days=30)
 → {tools: [{name: "Read", count: 1234}, {name: "Edit", count: 567}, ...]}
 ```
 
+## Session Discovery and Drill-In
+
+A common workflow is discovering sessions, getting signals about them, then drilling into interesting ones:
+
+### 1. Discover sessions
+```
+query_sessions(days=7)
+→ {sessions: [{id: "abc123", project: "my-repo", event_count: 50}, ...]}
+```
+
+### 2. Get signals for sessions
+```
+get_session_signals(days=7)
+→ {sessions: [
+    {session_id: "abc123", error_rate: 0.04, commit_count: 2, has_rework: false, ...},
+    {session_id: "def456", error_rate: 0.25, commit_count: 0, has_rework: true, ...}
+  ]}
+```
+
+The LLM interprets these raw signals - high error rate + rework + no commits might indicate frustration.
+
+### 3. Drill into an interesting session
+```
+# Get full event trace
+query_timeline(session_id="abc123")
+→ {events: [{tool: "Read", file: "auth.py", ...}, {tool: "Edit", ...}, ...]}
+
+# Get all user messages
+get_user_journey(session_id="abc123")
+→ {messages: [{content: "Fix the login bug", ...}, ...]}
+
+# Get commit associations
+get_session_commits(session_id="abc123")
+→ {commits: [{sha: "a1b2c3", time_to_commit_seconds: 1800, is_first_commit: true}]}
+```
+
 ## Common Patterns
 
 ### Understanding tool usage

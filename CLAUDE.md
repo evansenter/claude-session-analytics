@@ -103,6 +103,9 @@ Do this:
    - `get_user_journey(session_id=<id>)` - get all user messages
    - `get_session_commits(session_id=<id>)` - get commit associations
 
+> **Maintainer note**: This discovery flow is also documented in `src/session_analytics/guide.md`
+> (exposed as MCP resource `session-analytics://guide`). Keep both in sync when updating API docs.
+
 ## CLI Commands
 
 All commands support `--json` for machine-readable output:
