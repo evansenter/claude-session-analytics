@@ -9,6 +9,10 @@ import pytest
 from session_analytics.queries import (
     ensure_fresh_data,
     query_commands,
+    query_file_activity,
+    query_languages,
+    query_mcp_usage,
+    query_projects,
     query_sessions,
     query_timeline,
     query_tokens,
@@ -1256,3 +1260,278 @@ class TestGetUserJourneyIncludeProjects:
         assert result["project_switches"] is None
         for event in result["journey"]:
             assert "project" not in event
+
+
+class TestQueryFileActivity:
+    """Tests for file activity queries."""
+
+    def test_basic_file_activity(self, storage):
+        """Test basic file activity query."""
+        now = datetime.now()
+        events = [
+            Event(
+                id=None,
+                uuid="f1",
+                timestamp=now - timedelta(hours=1),
+                session_id="s1",
+                project_path="-test",
+                entry_type="tool_use",
+                tool_name="Read",
+                file_path="/path/to/file.py",
+            ),
+            Event(
+                id=None,
+                uuid="f2",
+                timestamp=now - timedelta(hours=2),
+                session_id="s1",
+                project_path="-test",
+                entry_type="tool_use",
+                tool_name="Edit",
+                file_path="/path/to/file.py",
+            ),
+            Event(
+                id=None,
+                uuid="f3",
+                timestamp=now - timedelta(hours=3),
+                session_id="s1",
+                project_path="-test",
+                entry_type="tool_use",
+                tool_name="Write",
+                file_path="/path/to/new.py",
+            ),
+        ]
+        storage.add_events_batch(events)
+
+        result = query_file_activity(storage, days=7)
+        assert result["file_count"] == 2
+        assert len(result["files"]) == 2
+
+        # file.py should have 2 operations (1 read, 1 edit)
+        file_py = next(f for f in result["files"] if "file.py" in f["file"])
+        assert file_py["reads"] == 1
+        assert file_py["edits"] == 1
+        assert file_py["writes"] == 0
+        assert file_py["total"] == 2
+
+    def test_collapse_worktrees(self, storage):
+        """Test worktree path collapsing."""
+        now = datetime.now()
+        events = [
+            Event(
+                id=None,
+                uuid="w1",
+                timestamp=now - timedelta(hours=1),
+                session_id="s1",
+                project_path="-test",
+                entry_type="tool_use",
+                tool_name="Read",
+                file_path="/projects/myrepo/src/main.rs",
+            ),
+            Event(
+                id=None,
+                uuid="w2",
+                timestamp=now - timedelta(hours=2),
+                session_id="s1",
+                project_path="-test",
+                entry_type="tool_use",
+                tool_name="Edit",
+                file_path="/projects/myrepo/.worktrees/feature-branch/src/main.rs",
+            ),
+        ]
+        storage.add_events_batch(events)
+
+        # Without collapse, should be 2 files
+        result_no_collapse = query_file_activity(storage, days=7, collapse_worktrees=False)
+        assert result_no_collapse["file_count"] == 2
+
+        # With collapse, should be 1 file (worktree path collapsed)
+        result_collapse = query_file_activity(storage, days=7, collapse_worktrees=True)
+        assert result_collapse["file_count"] == 1
+        assert result_collapse["files"][0]["total"] == 2
+
+
+class TestQueryLanguages:
+    """Tests for language distribution queries."""
+
+    def test_basic_languages(self, storage):
+        """Test basic language distribution."""
+        now = datetime.now()
+        events = [
+            Event(
+                id=None,
+                uuid="l1",
+                timestamp=now - timedelta(hours=1),
+                session_id="s1",
+                project_path="-test",
+                entry_type="tool_use",
+                tool_name="Read",
+                file_path="/path/to/file.py",
+            ),
+            Event(
+                id=None,
+                uuid="l2",
+                timestamp=now - timedelta(hours=2),
+                session_id="s1",
+                project_path="-test",
+                entry_type="tool_use",
+                tool_name="Edit",
+                file_path="/path/to/file.py",
+            ),
+            Event(
+                id=None,
+                uuid="l3",
+                timestamp=now - timedelta(hours=3),
+                session_id="s1",
+                project_path="-test",
+                entry_type="tool_use",
+                tool_name="Read",
+                file_path="/path/to/code.rs",
+            ),
+            Event(
+                id=None,
+                uuid="l4",
+                timestamp=now - timedelta(hours=4),
+                session_id="s1",
+                project_path="-test",
+                entry_type="tool_use",
+                tool_name="Read",
+                file_path="/path/to/doc.md",
+            ),
+        ]
+        storage.add_events_batch(events)
+
+        result = query_languages(storage, days=7)
+        assert result["total_operations"] == 4
+
+        langs = {lang["language"]: lang["count"] for lang in result["languages"]}
+        assert langs.get("Python") == 2
+        assert langs.get("Rust") == 1
+        assert langs.get("Markdown") == 1
+
+
+class TestQueryProjects:
+    """Tests for project activity queries."""
+
+    def test_basic_projects(self, storage):
+        """Test basic project activity."""
+        now = datetime.now()
+        events = [
+            Event(
+                id=None,
+                uuid="p1",
+                timestamp=now - timedelta(hours=1),
+                session_id="s1",
+                project_path="-Users-dev-projects-myapp",
+                entry_type="tool_use",
+                tool_name="Read",
+            ),
+            Event(
+                id=None,
+                uuid="p2",
+                timestamp=now - timedelta(hours=2),
+                session_id="s1",
+                project_path="-Users-dev-projects-myapp",
+                entry_type="tool_use",
+                tool_name="Edit",
+            ),
+            Event(
+                id=None,
+                uuid="p3",
+                timestamp=now - timedelta(hours=3),
+                session_id="s2",
+                project_path="-Users-dev-projects-other",
+                entry_type="tool_use",
+                tool_name="Read",
+            ),
+        ]
+        storage.add_events_batch(events)
+
+        storage.upsert_session(
+            Session(
+                id="s1",
+                project_path="-Users-dev-projects-myapp",
+                first_seen=now - timedelta(hours=2),
+                last_seen=now - timedelta(hours=1),
+                entry_count=2,
+            )
+        )
+        storage.upsert_session(
+            Session(
+                id="s2",
+                project_path="-Users-dev-projects-other",
+                first_seen=now - timedelta(hours=3),
+                last_seen=now - timedelta(hours=3),
+                entry_count=1,
+            )
+        )
+
+        result = query_projects(storage, days=7)
+        assert result["project_count"] == 2
+
+        # project names are extracted from project_path using get_repo_name()
+        # which falls back to last component when no known markers found
+        projects = {p["name"]: p for p in result["projects"]}
+        assert projects["-Users-dev-projects-myapp"]["events"] == 2
+        assert projects["-Users-dev-projects-myapp"]["sessions"] == 1
+        assert projects["-Users-dev-projects-other"]["events"] == 1
+
+
+class TestQueryMcpUsage:
+    """Tests for MCP usage queries."""
+
+    def test_basic_mcp_usage(self, storage):
+        """Test basic MCP usage breakdown."""
+        now = datetime.now()
+        events = [
+            Event(
+                id=None,
+                uuid="m1",
+                timestamp=now - timedelta(hours=1),
+                session_id="s1",
+                project_path="-test",
+                entry_type="tool_use",
+                tool_name="mcp__github__get_issue",
+            ),
+            Event(
+                id=None,
+                uuid="m2",
+                timestamp=now - timedelta(hours=2),
+                session_id="s1",
+                project_path="-test",
+                entry_type="tool_use",
+                tool_name="mcp__github__create_pr",
+            ),
+            Event(
+                id=None,
+                uuid="m3",
+                timestamp=now - timedelta(hours=3),
+                session_id="s1",
+                project_path="-test",
+                entry_type="tool_use",
+                tool_name="mcp__event-bus__publish_event",
+            ),
+            Event(
+                id=None,
+                uuid="m4",
+                timestamp=now - timedelta(hours=4),
+                session_id="s1",
+                project_path="-test",
+                entry_type="tool_use",
+                tool_name="Read",  # Non-MCP tool, should be ignored
+            ),
+        ]
+        storage.add_events_batch(events)
+
+        result = query_mcp_usage(storage, days=7)
+        assert result["total_mcp_calls"] == 3
+
+        servers = {s["server"]: s for s in result["servers"]}
+        assert "github" in servers
+        assert "event-bus" in servers
+
+        assert servers["github"]["total"] == 2
+        github_tools = {t["tool"]: t["count"] for t in servers["github"]["tools"]}
+        assert github_tools.get("get_issue") == 1
+        assert github_tools.get("create_pr") == 1
+
+        assert servers["event-bus"]["total"] == 1

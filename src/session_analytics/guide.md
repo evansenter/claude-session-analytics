@@ -25,6 +25,10 @@ identify permission gaps.
 | `list_sessions(days?, project?)` | Session metadata and token totals |
 | `get_token_usage(days?, by?, project?)` | Token usage by day, session, or model |
 | `get_session_events(days?, tool?, session_id?)` | Recent events with filtering |
+| `get_file_activity(days?, project?, limit?, collapse_worktrees?)` | File reads/edits/writes breakdown |
+| `get_languages(days?, project?)` | Language distribution from file extensions |
+| `get_projects(days?)` | Activity across all projects |
+| `get_mcp_usage(days?, project?)` | MCP server and tool usage |
 
 ### Pattern Analysis
 

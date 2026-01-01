@@ -617,6 +617,84 @@ def get_session_commits(session_id: str | None = None, days: int = 7) -> dict:
         }
 
 
+@mcp.tool()
+def get_file_activity(
+    days: int = 7,
+    project: str | None = None,
+    limit: int = 20,
+    collapse_worktrees: bool = False,
+) -> dict:
+    """Get file activity (reads, edits, writes) with breakdown.
+
+    Args:
+        days: Number of days to analyze (default: 7)
+        project: Optional project path filter
+        limit: Maximum files to return (default: 20)
+        collapse_worktrees: If True, consolidate .worktrees/<branch>/ paths
+
+    Returns:
+        File activity data with read/edit/write breakdown per file
+    """
+    queries.ensure_fresh_data(storage, days=days, project=project)
+    result = queries.query_file_activity(
+        storage,
+        days=days,
+        project=project,
+        limit=limit,
+        collapse_worktrees=collapse_worktrees,
+    )
+    return {"status": "ok", **result}
+
+
+@mcp.tool()
+def get_languages(days: int = 7, project: str | None = None) -> dict:
+    """Get language distribution from file extensions.
+
+    Args:
+        days: Number of days to analyze (default: 7)
+        project: Optional project path filter
+
+    Returns:
+        Language distribution with counts and percentages
+    """
+    queries.ensure_fresh_data(storage, days=days, project=project)
+    result = queries.query_languages(storage, days=days, project=project)
+    return {"status": "ok", **result}
+
+
+@mcp.tool()
+def get_projects(days: int = 7) -> dict:
+    """Get activity breakdown by project.
+
+    Note: No project filter - this shows activity *across* all projects.
+
+    Args:
+        days: Number of days to analyze (default: 7)
+
+    Returns:
+        Project activity data with event counts and session counts per project
+    """
+    queries.ensure_fresh_data(storage, days=days)
+    result = queries.query_projects(storage, days=days)
+    return {"status": "ok", **result}
+
+
+@mcp.tool()
+def get_mcp_usage(days: int = 7, project: str | None = None) -> dict:
+    """Get MCP server and tool usage breakdown.
+
+    Args:
+        days: Number of days to analyze (default: 7)
+        project: Optional project path filter
+
+    Returns:
+        MCP usage grouped by server with tool breakdown
+    """
+    queries.ensure_fresh_data(storage, days=days, project=project)
+    result = queries.query_mcp_usage(storage, days=days, project=project)
+    return {"status": "ok", **result}
+
+
 def create_app():
     """Create the ASGI app for uvicorn."""
     # stateless_http=True allows resilience to server restarts

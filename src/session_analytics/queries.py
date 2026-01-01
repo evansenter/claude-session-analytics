@@ -1418,12 +1418,15 @@ def query_projects(
 ) -> dict:
     """Query cross-project activity.
 
+    Note: This function intentionally does not have a project filter parameter
+    because it's designed to show activity *across* all projects.
+
     Args:
         storage: Storage instance
         days: Number of days to analyze
 
     Returns:
-        Project activity data
+        Project activity data with event counts and session counts per project
     """
     cutoff = datetime.now() - timedelta(days=days)
 

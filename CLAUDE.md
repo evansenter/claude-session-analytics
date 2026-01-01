@@ -69,6 +69,7 @@ The install is editable (`pip install -e .`), so Python code changes are picked 
 - **Formatter Registry**: CLI uses `@_register_formatter(predicate)` decorator pattern
 - **Schema Migrations**: Use `@migration(version, name)` decorator in storage.py for DB changes
 - **Module Imports**: server.py uses `from session_analytics import queries, patterns, ingest`
+- **CLI/MCP Parity**: Always expose new query functions on both CLI and MCP. Add MCP tool in `server.py`, CLI command in `cli.py`, document in both `guide.md` and this file
 
 ## MCP API Naming Conventions
 
@@ -133,6 +134,10 @@ Do this:
 | `search_messages` | Full-text search on user messages (FTS5) |
 | `get_session_signals` | Raw session metrics for LLM interpretation (RFC #26) |
 | `get_session_commits` | Session-commit mappings with timing (RFC #26) |
+| `get_file_activity` | File reads/edits/writes with breakdown |
+| `get_languages` | Language distribution from file extensions |
+| `get_projects` | Activity across all projects |
+| `get_mcp_usage` | MCP server and tool usage breakdown |
 
 ### Session Discovery and Drill-In Flow
 
@@ -164,6 +169,10 @@ session-analytics-cli journey             # User messages across sessions
 session-analytics-cli search <query>      # Full-text search on messages
 session-analytics-cli signals             # Raw session signals (RFC #26)
 session-analytics-cli session-commits     # Session-commit associations (RFC #26)
+session-analytics-cli file-activity       # File reads/edits/writes
+session-analytics-cli languages           # Language distribution
+session-analytics-cli projects            # Cross-project activity
+session-analytics-cli mcp-usage           # MCP server/tool usage
 ```
 
 ### Expand Flags
