@@ -1091,26 +1091,21 @@ class TestGetInsightsIntegration:
         assert "has_classification" in insights["summary"]
 
 
-class TestDetectSessionOutcomes:
-    """Tests for RFC #26 session outcome detection."""
+class TestGetSessionSignals:
+    """Tests for RFC #26 session signals (revised per RFC #17 - raw data only)."""
 
-    def test_detect_outcomes_empty_database(self, storage):
+    def test_get_signals_empty_database(self, storage):
         """Test with empty database."""
-        from session_analytics.patterns import detect_session_outcomes
+        from session_analytics.patterns import get_session_signals
 
-        result = detect_session_outcomes(storage, days=7)
+        result = get_session_signals(storage, days=7)
 
         assert result["sessions_analyzed"] == 0
-        assert result["outcome_distribution"] == {
-            "success": 0,
-            "abandoned": 0,
-            "frustrated": 0,
-            "unknown": 0,
-        }
+        assert result["sessions"] == []
 
-    def test_detect_outcome_success_with_commit(self, storage):
-        """Test that sessions with commits are marked as success."""
-        from session_analytics.patterns import detect_session_outcomes
+    def test_get_signals_with_commits(self, storage):
+        """Test that commit counts are included in signals."""
+        from session_analytics.patterns import get_session_signals
         from session_analytics.storage import GitCommit, Session
 
         now = datetime.now()
@@ -1119,112 +1114,73 @@ class TestDetectSessionOutcomes:
         events = [
             Event(
                 id=None,
-                uuid=f"suc-{i}",
+                uuid=f"sig-{i}",
                 timestamp=now - timedelta(hours=1, minutes=i),
-                session_id="success-session",
+                session_id="signal-session",
                 project_path="/project",
                 entry_type="tool_use",
                 tool_name="Edit" if i % 2 == 0 else "Read",
                 file_path=f"/file{i}.py",
             )
-            for i in range(15)  # Need enough events
+            for i in range(15)
         ]
         storage.add_events_batch(events)
 
         # Create session record
-        storage.upsert_session(Session(id="success-session", project_path="/project"))
+        storage.upsert_session(Session(id="signal-session", project_path="/project"))
 
         # Add commit and link it
         storage.add_git_commit(GitCommit(sha="abc1234", timestamp=now))
-        storage.add_session_commit("success-session", "abc1234", 300, True)
+        storage.add_session_commit("signal-session", "abc1234", 300, True)
 
-        result = detect_session_outcomes(storage, days=7, min_events=5)
+        result = get_session_signals(storage, days=7, min_events=5)
 
-        # Should have one session analyzed
+        # Should have raw signals, no outcome classification
         assert result["sessions_analyzed"] == 1
-        assert result["sessions"][0]["session_id"] == "success-session"
-        assert result["sessions"][0]["outcome"] == "success"
-        assert result["sessions"][0]["commit_count"] == 1
+        session = result["sessions"][0]
+        assert session["session_id"] == "signal-session"
+        assert session["commit_count"] == 1
+        assert session["event_count"] == 15
+        assert "outcome" not in session  # No interpretation
+        assert "confidence" not in session  # No interpretation
 
-    def test_detect_outcome_frustrated_high_errors(self, storage):
-        """Test that sessions with high error rate are marked as frustrated."""
-        from session_analytics.patterns import detect_session_outcomes
+    def test_get_signals_with_errors(self, storage):
+        """Test that error rates are included in signals."""
+        from session_analytics.patterns import get_session_signals
 
         now = datetime.now()
 
-        # Create session with many errors
+        # Create session with some errors
         events = []
         for i in range(10):
-            # Tool use
             events.append(
                 Event(
                     id=None,
-                    uuid=f"frust-use-{i}",
+                    uuid=f"err-use-{i}",
                     timestamp=now - timedelta(hours=1, minutes=i * 2),
-                    session_id="frustrated-session",
+                    session_id="error-session",
                     project_path="/project",
                     entry_type="tool_use",
                     tool_name="Edit",
                     tool_id=f"tool-{i}",
                     file_path="/file.py",
-                )
-            )
-            # Error result
-            events.append(
-                Event(
-                    id=None,
-                    uuid=f"frust-result-{i}",
-                    timestamp=now - timedelta(hours=1, minutes=i * 2 + 1),
-                    session_id="frustrated-session",
-                    project_path="/project",
-                    entry_type="tool_result",
-                    tool_id=f"tool-{i}",
-                    is_error=True,
+                    is_error=(i < 3),  # 3 errors out of 10
                 )
             )
         storage.add_events_batch(events)
 
-        result = detect_session_outcomes(storage, days=7, min_events=5)
+        result = get_session_signals(storage, days=7, min_events=5)
 
-        # Should detect frustrated due to high error rate
+        # Should include error rate as raw signal
         assert result["sessions_analyzed"] == 1
         session = result["sessions"][0]
-        assert session["session_id"] == "frustrated-session"
-        assert session["error_rate"] >= 0.4  # 50% error rate
-        assert session["outcome"] in ["frustrated", "unknown"]  # High errors = frustrated
+        assert session["error_count"] == 3
+        assert session["error_rate"] == 0.3
+        assert "outcome" not in session  # No interpretation
 
-    def test_detect_outcome_abandoned_no_commit(self, storage):
-        """Test that sessions with edits but no commits are marked as abandoned."""
-        from session_analytics.patterns import detect_session_outcomes
-
-        now = datetime.now()
-
-        # Create short session with edits but no commit
-        events = [
-            Event(
-                id=None,
-                uuid=f"aband-{i}",
-                timestamp=now - timedelta(minutes=i),
-                session_id="abandoned-session",
-                project_path="/project",
-                entry_type="tool_use",
-                tool_name="Edit",
-                file_path="/file.py",
-            )
-            for i in range(8)  # Short session with multiple edits
-        ]
-        storage.add_events_batch(events)
-
-        result = detect_session_outcomes(storage, days=7, min_events=5)
-
-        # Should detect abandoned (edits but no commit)
-        assert result["sessions_analyzed"] == 1
-        session = result["sessions"][0]
-        assert session["commit_count"] == 0
-
-    def test_detect_outcomes_min_events_filter(self, storage):
+    def test_get_signals_min_events_filter(self, storage):
         """Test that sessions below min_events threshold are excluded."""
-        from session_analytics.patterns import detect_session_outcomes
+        from session_analytics.patterns import get_session_signals
 
         now = datetime.now()
 
@@ -1243,55 +1199,61 @@ class TestDetectSessionOutcomes:
         ]
         storage.add_events_batch(events)
 
-        result = detect_session_outcomes(storage, days=7, min_events=5)
+        result = get_session_signals(storage, days=7, min_events=5)
 
         # Session should be excluded due to min_events
         assert result["sessions_analyzed"] == 0
 
-
-class TestUpdateSessionOutcomes:
-    """Tests for persisting session outcomes."""
-
-    def test_update_session_outcomes(self, storage):
-        """Test that outcomes are persisted to sessions table."""
-        from session_analytics.patterns import update_session_outcomes
-        from session_analytics.storage import GitCommit, Session
+    def test_get_signals_includes_all_raw_fields(self, storage):
+        """Test that all expected raw signal fields are present."""
+        from session_analytics.patterns import get_session_signals
+        from session_analytics.storage import Session
 
         now = datetime.now()
 
-        # Create session with events
+        # Create session with various activity
         events = [
             Event(
                 id=None,
-                uuid=f"persist-{i}",
+                uuid=f"full-{i}",
                 timestamp=now - timedelta(hours=1, minutes=i),
-                session_id="persist-session",
+                session_id="full-session",
                 project_path="/project",
                 entry_type="tool_use",
                 tool_name="Edit",
+                file_path="/file.py",
+                command="git" if i == 0 else None,
+                skill_name="commit" if i == 1 else None,
             )
             for i in range(10)
         ]
         storage.add_events_batch(events)
+        storage.upsert_session(Session(id="full-session", project_path="/project"))
 
-        # Create session record
-        storage.upsert_session(Session(id="persist-session", project_path="/project"))
+        result = get_session_signals(storage, days=7, min_events=5)
 
-        # Add commit
-        storage.add_git_commit(GitCommit(sha="def5678", timestamp=now))
-        storage.add_session_commit("persist-session", "def5678", 600, True)
+        assert result["sessions_analyzed"] == 1
+        session = result["sessions"][0]
 
-        # Run update
-        result = update_session_outcomes(storage, days=7)
+        # Verify all expected raw signal fields
+        expected_fields = [
+            "session_id",
+            "project_path",
+            "event_count",
+            "error_count",
+            "edit_count",
+            "git_count",
+            "skill_count",
+            "commit_count",
+            "error_rate",
+            "duration_minutes",
+            "has_rework",
+            "has_pr_activity",
+        ]
+        for field in expected_fields:
+            assert field in session, f"Missing field: {field}"
 
-        assert result["sessions_updated"] == 1
-
-        # Verify the session was updated
-        rows = storage.execute_query(
-            "SELECT outcome, outcome_confidence, satisfaction_score FROM sessions WHERE id = ?",
-            ("persist-session",),
-        )
-        assert len(rows) == 1
-        assert rows[0]["outcome"] == "success"
-        assert rows[0]["outcome_confidence"] is not None
-        assert rows[0]["satisfaction_score"] is not None
+        # Verify NO interpretation fields
+        interpretation_fields = ["outcome", "confidence", "satisfaction_score"]
+        for field in interpretation_fields:
+            assert field not in session, f"Unexpected interpretation field: {field}"

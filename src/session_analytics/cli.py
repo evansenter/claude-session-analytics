@@ -24,16 +24,13 @@ from session_analytics.patterns import (
     compute_sequence_patterns,
 )
 from session_analytics.patterns import (
-    detect_session_outcomes as do_detect_outcomes,
-)
-from session_analytics.patterns import (
     get_insights as do_get_insights,
 )
 from session_analytics.patterns import (
-    sample_sequences as do_sample_sequences,
+    get_session_signals as do_get_signals,
 )
 from session_analytics.patterns import (
-    update_session_outcomes as do_update_outcomes,
+    sample_sequences as do_sample_sequences,
 )
 from session_analytics.queries import (
     classify_sessions as do_classify_sessions,
@@ -347,42 +344,33 @@ def _format_handoff_context(data: dict) -> list[str]:
     return lines
 
 
-@_register_formatter(lambda d: "outcome_distribution" in d and "sessions" in d)
-def _format_outcomes(data: dict) -> list[str]:
+@_register_formatter(
+    lambda d: "sessions_analyzed" in d
+    and "sessions" in d
+    and "error_count" in d.get("sessions", [{}])[0]
+)
+def _format_signals(data: dict) -> list[str]:
+    """Format raw session signals for display.
+
+    Per RFC #17: Surfaces raw data for LLM interpretation, no outcome labels.
+    """
     lines = [
-        f"Session Outcomes (last {data['days']} days)",
+        f"Session Signals (last {data['days']} days)",
         f"Sessions analyzed: {data['sessions_analyzed']}",
         "",
-        "Outcome distribution:",
+        "Sessions (raw signals for LLM interpretation):",
     ]
-    for outcome, count in data.get("outcome_distribution", {}).items():
-        if count > 0:
-            lines.append(f"  {outcome}: {count}")
-    lines.append("")
-
-    lines.append("Sessions:")
     for sess in data.get("sessions", [])[:15]:
-        confidence = sess.get("confidence", 0)
         commit_info = f", {sess['commit_count']} commits" if sess.get("commit_count") else ""
+        error_info = f", {sess['error_rate']:.0%} errors" if sess.get("error_rate", 0) > 0 else ""
+        rework = " [rework]" if sess.get("has_rework") else ""
+        pr = " [PR]" if sess.get("has_pr_activity") else ""
         lines.append(
-            f"  {sess['session_id'][:16]} - {sess['outcome']} ({confidence:.0%}){commit_info}"
+            f"  {sess['session_id'][:16]} - {sess['event_count']} events, "
+            f"{sess['duration_minutes']:.0f}m{commit_info}{error_info}{rework}{pr}"
         )
     if len(data.get("sessions", [])) > 15:
         lines.append(f"  ... and {len(data['sessions']) - 15} more")
-    return lines
-
-
-@_register_formatter(lambda d: "sessions_detected" in d and "sessions_updated" in d)
-def _format_update_outcomes(data: dict) -> list[str]:
-    lines = [
-        f"Updated {data['sessions_updated']} sessions with outcomes",
-        f"Sessions detected: {data['sessions_detected']}",
-        "",
-        "Outcome distribution:",
-    ]
-    for outcome, count in data.get("outcome_distribution", {}).items():
-        if count > 0:
-            lines.append(f"  {outcome}: {count}")
     return lines
 
 
@@ -694,24 +682,13 @@ def cmd_git_correlate(args):
     print(format_output(result, args.json))
 
 
-def cmd_outcomes(args):
-    """Show session outcomes (RFC #26)."""
+def cmd_signals(args):
+    """Show raw session signals for LLM interpretation (RFC #26, revised per RFC #17)."""
     storage = SQLiteStorage()
-    result = do_detect_outcomes(
+    result = do_get_signals(
         storage,
         days=args.days,
         min_events=args.min_events,
-        project=args.project,
-    )
-    print(format_output(result, args.json))
-
-
-def cmd_update_outcomes(args):
-    """Persist session outcomes to database (RFC #26)."""
-    storage = SQLiteStorage()
-    result = do_update_outcomes(
-        storage,
-        days=args.days,
         project=args.project,
     )
     print(format_output(result, args.json))
@@ -932,22 +909,14 @@ Data location: ~/.claude/contrib/analytics/data.db
     sub.add_argument("--days", type=int, default=7, help="Days to correlate (default: 7)")
     sub.set_defaults(func=cmd_git_correlate)
 
-    # outcomes (RFC #26)
-    sub = subparsers.add_parser(
-        "outcomes", help="Show session outcomes (success/abandoned/frustrated)"
-    )
+    # signals (RFC #26, revised per RFC #17 - raw data, no interpretation)
+    sub = subparsers.add_parser("signals", help="Show raw session signals for LLM interpretation")
     sub.add_argument("--days", type=int, default=7, help="Days to analyze (default: 7)")
     sub.add_argument(
         "--min-events", type=int, default=5, help="Min events per session (default: 5)"
     )
     sub.add_argument("--project", help="Project path filter")
-    sub.set_defaults(func=cmd_outcomes)
-
-    # update-outcomes (RFC #26)
-    sub = subparsers.add_parser("update-outcomes", help="Persist outcomes to database")
-    sub.add_argument("--days", type=int, default=7, help="Days to process (default: 7)")
-    sub.add_argument("--project", help="Project path filter")
-    sub.set_defaults(func=cmd_update_outcomes)
+    sub.set_defaults(func=cmd_signals)
 
     # session-commits (RFC #26)
     sub = subparsers.add_parser("session-commits", help="Show session-commit associations")

@@ -13,8 +13,7 @@ Provides tools for querying Claude Code session logs:
 - get_status: Ingestion status + DB stats
 - get_user_journey: User messages across sessions
 - search_messages: Full-text search on user messages
-- query_outcomes: Session outcome detection (RFC #26)
-- update_outcomes: Persist outcomes to database (RFC #26)
+- get_session_signals: Raw session signals for LLM interpretation (RFC #26)
 - get_session_commits: Session-commit mappings (RFC #26)
 """
 
@@ -531,42 +530,26 @@ def correlate_git_with_sessions(days: int = 7) -> dict:
 
 
 @mcp.tool()
-def query_outcomes(days: int = 7, min_events: int = 5) -> dict:
-    """Detect and return session outcomes.
+def get_session_signals(days: int = 7, min_events: int = 5) -> dict:
+    """Get raw session signals for LLM interpretation.
 
-    RFC #26: Analyzes sessions to determine likely outcomes:
-    - success: Task completed (commit made, PR created, tests pass)
-    - abandoned: User stopped mid-task without completion
-    - frustrated: High error rate, rework patterns, retries
-    - unknown: Not enough data to determine
+    RFC #26 (revised per RFC #17 principle): Extracts observable session data
+    without interpretation. Per RFC #17: "Don't over-distill - raw data with
+    light structure beats heavily processed summaries. The LLM can handle context."
 
-    Args:
-        days: Number of days to analyze (default: 7)
-        min_events: Minimum events for a session to be analyzed (default: 5)
-
-    Returns:
-        Session outcomes with confidence scores and distribution
-    """
-    queries.ensure_fresh_data(storage, days=days)
-    result = patterns.detect_session_outcomes(storage, days=days, min_events=min_events)
-    return {"status": "ok", **result}
-
-
-@mcp.tool()
-def update_outcomes(days: int = 7) -> dict:
-    """Detect and persist session outcomes to the database.
-
-    RFC #26: Runs outcome detection and updates sessions with outcome,
-    outcome_confidence, and satisfaction_score fields.
+    Returns raw signals like event counts, error rates, commit counts, and
+    boolean flags (has_rework, has_pr_activity). The consuming LLM should
+    interpret these to determine outcomes like success or abandonment.
 
     Args:
         days: Number of days to analyze (default: 7)
+        min_events: Minimum events for a session to be included (default: 5)
 
     Returns:
-        Update statistics including sessions processed
+        Raw session signals for LLM interpretation
     """
     queries.ensure_fresh_data(storage, days=days)
-    result = patterns.update_session_outcomes(storage, days=days)
+    result = patterns.get_session_signals(storage, days=days, min_events=min_events)
     return {"status": "ok", **result}
 
 

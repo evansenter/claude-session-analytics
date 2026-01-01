@@ -769,28 +769,29 @@ def get_insights(
     return insights
 
 
-def detect_session_outcomes(
+def get_session_signals(
     storage: SQLiteStorage,
     days: int = 7,
     min_events: int = 5,
     project: str | None = None,
 ) -> dict:
-    """Detect task outcomes for sessions.
+    """Get raw session signals for LLM interpretation.
 
-    RFC #26: Analyzes sessions to determine likely outcomes:
-    - success: Task completed (commit made, PR created, tests pass)
-    - abandoned: User stopped mid-task without completion
-    - frustrated: High error rate, rework patterns, retries
-    - unknown: Not enough data to determine
+    RFC #26 (revised per RFC #17 principle): Extracts observable session data
+    without interpretation. Per RFC #17: "Don't over-distill - raw data with
+    light structure beats heavily processed summaries. The LLM can handle context."
+
+    The consuming LLM should interpret these signals to determine outcomes like
+    success, abandonment, or frustration based on the full context.
 
     Args:
         storage: Storage instance
         days: Number of days to analyze (default: 7)
-        min_events: Minimum events for a session to be analyzed (default: 5)
+        min_events: Minimum events for a session to be included (default: 5)
         project: Optional project path filter
 
     Returns:
-        Dict with session outcomes and summary statistics
+        Dict with raw session signals for LLM interpretation
     """
     cutoff = datetime.now() - timedelta(days=days)
 
@@ -835,7 +836,7 @@ def detect_session_outcomes(
     )
     commits_by_session = {r["session_id"]: r["commit_count"] for r in commit_counts}
 
-    # Detect rework patterns for frustration detection
+    # Detect rework patterns (file edited 4+ times in session)
     rework_sessions = set()
     file_edits = storage.execute_query(
         """
@@ -870,24 +871,20 @@ def detect_session_outcomes(
     for row in pr_events:
         pr_sessions.add(row["session_id"])
 
-    # Analyze each session
-    outcomes = []
-    outcome_counts = {"success": 0, "abandoned": 0, "frustrated": 0, "unknown": 0}
-
+    # Build raw signals for each session (no interpretation)
+    signals = []
     for session in sessions:
         session_id = session["session_id"]
         event_count = session["event_count"]
         error_count = session["error_count"] or 0
         edit_count = session["edit_count"] or 0
         git_count = session["git_count"] or 0
+        skill_count = session["skill_count"] or 0
         commit_count = commits_by_session.get(session_id, 0)
-        has_rework = session_id in rework_sessions
-        has_pr_activity = session_id in pr_sessions
 
-        # Calculate error rate
+        # Calculate derived observables (still factual, not interpretive)
         error_rate = error_count / event_count if event_count > 0 else 0
 
-        # Calculate session duration
         first_event = session["first_event"]
         last_event = session["last_event"]
         if isinstance(first_event, str):
@@ -898,160 +895,30 @@ def detect_session_outcomes(
             (last_event - first_event).total_seconds() / 60 if first_event and last_event else 0
         )
 
-        # Scoring system
-        success_score = 0.0
-        frustrated_score = 0.0
-        abandoned_score = 0.0
-
-        # Success indicators
-        if commit_count > 0:
-            success_score += 0.4
-        if has_pr_activity:
-            success_score += 0.3
-        if error_rate < 0.05 and event_count > 10:
-            success_score += 0.2
-        if git_count > 0:
-            success_score += 0.1
-
-        # Frustration indicators
-        if error_rate > 0.2:
-            frustrated_score += 0.4
-        if has_rework:
-            frustrated_score += 0.3
-        if error_count > 5:
-            frustrated_score += 0.2
-        if duration_minutes > 60 and commit_count == 0:
-            frustrated_score += 0.1
-
-        # Abandoned indicators
-        if edit_count > 5 and commit_count == 0:
-            abandoned_score += 0.3
-        if event_count < 20 and commit_count == 0 and not has_pr_activity:
-            abandoned_score += 0.2
-        if duration_minutes < 10 and event_count < 15:
-            abandoned_score += 0.2
-
-        # Determine outcome
-        scores = {
-            "success": success_score,
-            "frustrated": frustrated_score,
-            "abandoned": abandoned_score,
-        }
-        max_score = max(scores.values())
-
-        if max_score < 0.3:
-            outcome = "unknown"
-            confidence = 1.0 - max_score  # Lower confidence when scores are low
-        else:
-            outcome = max(scores, key=scores.get)
-            confidence = min(1.0, max_score + 0.2)  # Boost confidence for clear signals
-
-        outcome_counts[outcome] += 1
-        outcomes.append(
+        signals.append(
             {
                 "session_id": session_id,
                 "project_path": session["project_path"],
-                "outcome": outcome,
-                "confidence": round(confidence, 2),
+                # Raw counts
                 "event_count": event_count,
-                "error_rate": round(error_rate, 3),
+                "error_count": error_count,
+                "edit_count": edit_count,
+                "git_count": git_count,
+                "skill_count": skill_count,
                 "commit_count": commit_count,
+                # Derived observables
+                "error_rate": round(error_rate, 3),
                 "duration_minutes": round(duration_minutes, 1),
+                # Boolean flags (observable patterns)
+                "has_rework": session_id in rework_sessions,
+                "has_pr_activity": session_id in pr_sessions,
             }
         )
 
     return {
         "days": days,
-        "sessions_analyzed": len(outcomes),
-        "outcome_distribution": outcome_counts,
-        "sessions": outcomes,
-    }
-
-
-def update_session_outcomes(
-    storage: SQLiteStorage, days: int = 7, project: str | None = None
-) -> dict:
-    """Detect and persist session outcomes to the sessions table.
-
-    RFC #26: Runs outcome detection and updates sessions with outcome,
-    outcome_confidence, and satisfaction_score fields.
-
-    Args:
-        storage: Storage instance
-        days: Number of days to analyze (default: 7)
-        project: Optional project path filter
-
-    Returns:
-        Dict with update statistics
-    """
-
-    # Detect outcomes
-    detection_result = detect_session_outcomes(storage, days=days, project=project)
-
-    # Update each session
-    updated = 0
-    errors = 0
-    failed_sessions: list[dict] = []
-
-    for session_data in detection_result["sessions"]:
-        try:
-            # Calculate satisfaction score from outcome
-            satisfaction_map = {
-                "success": 0.8,
-                "unknown": 0.5,
-                "abandoned": 0.3,
-                "frustrated": 0.2,
-            }
-            base_satisfaction = satisfaction_map.get(session_data["outcome"], 0.5)
-            # Adjust by confidence
-            satisfaction = base_satisfaction * session_data["confidence"]
-
-            # Get existing session data to preserve other fields
-            existing = storage.execute_query(
-                "SELECT * FROM sessions WHERE id = ?",
-                (session_data["session_id"],),
-            )
-
-            if existing:
-                # Update existing session
-                storage.execute_write(
-                    """
-                    UPDATE sessions
-                    SET outcome = ?,
-                        outcome_confidence = ?,
-                        satisfaction_score = ?
-                    WHERE id = ?
-                    """,
-                    (
-                        session_data["outcome"],
-                        session_data["confidence"],
-                        round(satisfaction, 2),
-                        session_data["session_id"],
-                    ),
-                )
-                updated += 1
-        except Exception as e:
-            logger.error(
-                "Failed to update outcome for session %s: %s",
-                session_data["session_id"],
-                e,
-                exc_info=True,
-            )
-            errors += 1
-            failed_sessions.append(
-                {
-                    "session_id": session_data["session_id"],
-                    "error": str(e),
-                }
-            )
-
-    return {
-        "days": days,
-        "sessions_detected": detection_result["sessions_analyzed"],
-        "sessions_updated": updated,
-        "errors": errors,
-        "failed_sessions": failed_sessions[:10],  # Limit to avoid huge payloads
-        "outcome_distribution": detection_result["outcome_distribution"],
+        "sessions_analyzed": len(signals),
+        "sessions": signals,
     }
 
 

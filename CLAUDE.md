@@ -54,6 +54,27 @@ make dev        # Run in dev mode with auto-reload
 - **Schema Migrations**: Use `@migration(version, name)` decorator in storage.py for DB changes
 - **Module Imports**: server.py uses `from session_analytics import queries, patterns, ingest`
 
+## Design Philosophy
+
+**"Don't over-distill"** (RFC #17): Raw data with light structure beats heavily processed summaries. The LLM can handle context.
+
+This means:
+- **Surface raw signals, not interpretations**: Return event counts, error rates, and timing data - not pre-computed labels like "success" or "frustrated"
+- **Let the LLM interpret**: The consuming LLM has context we don't (user intent, conversation history). It should decide what patterns mean
+- **Avoid premature classification**: Don't try to outsmart the LLM by pre-digesting data. Structured raw data is more useful than simplified conclusions
+
+Example - instead of:
+```python
+# BAD: Pre-computed interpretation
+{"outcome": "frustrated", "confidence": 0.75}
+```
+
+Do this:
+```python
+# GOOD: Raw signals for LLM interpretation
+{"error_count": 5, "error_rate": 0.25, "has_rework": True, "commit_count": 0}
+```
+
 ## MCP Tools
 
 | Tool | Purpose |
@@ -70,6 +91,8 @@ make dev        # Run in dev mode with auto-reload
 | `get_insights` | Pre-computed patterns for /improve-workflow |
 | `get_user_journey` | User messages across sessions chronologically |
 | `search_messages` | Full-text search on user messages (FTS5) |
+| `get_session_signals` | Raw session metrics for LLM interpretation (RFC #26) |
+| `get_session_commits` | Session-commit mappings with timing (RFC #26) |
 
 ## CLI Commands
 
@@ -87,6 +110,8 @@ session-analytics-cli permissions         # Permission gaps
 session-analytics-cli insights            # For /improve-workflow
 session-analytics-cli journey             # User messages across sessions
 session-analytics-cli search <query>      # Full-text search on messages
+session-analytics-cli signals             # Raw session signals (RFC #26)
+session-analytics-cli session-commits     # Session-commit associations (RFC #26)
 ```
 
 ## Integration

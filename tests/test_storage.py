@@ -792,40 +792,12 @@ class TestSessionCommits:
 
 
 class TestSessionEnrichmentFields:
-    """Tests for RFC #26 session enrichment fields."""
+    """Tests for RFC #26 session enrichment fields (observable data only).
 
-    def test_session_with_outcome(self, storage):
-        """Test storing and retrieving session outcome."""
-        session = Session(
-            id="session-outcome-1",
-            project_path="project-a",
-            outcome="success",
-            outcome_confidence=0.85,
-        )
-        storage.upsert_session(session)
-
-        # Retrieve via execute_query
-        rows = storage.execute_query(
-            "SELECT outcome, outcome_confidence FROM sessions WHERE id = ?",
-            ("session-outcome-1",),
-        )
-        assert len(rows) == 1
-        assert rows[0]["outcome"] == "success"
-        assert rows[0]["outcome_confidence"] == 0.85
-
-    def test_session_with_satisfaction_score(self, storage):
-        """Test storing and retrieving satisfaction score."""
-        session = Session(
-            id="session-satisfaction-1",
-            satisfaction_score=0.72,
-        )
-        storage.upsert_session(session)
-
-        rows = storage.execute_query(
-            "SELECT satisfaction_score FROM sessions WHERE id = ?",
-            ("session-satisfaction-1",),
-        )
-        assert rows[0]["satisfaction_score"] == 0.72
+    Per RFC #17 principle: "Don't over-distill - raw data with light structure
+    beats heavily processed summaries." We only store observable data like
+    context_switch_count, not interpretation fields like outcome/satisfaction.
+    """
 
     def test_session_with_context_switch_count(self, storage):
         """Test storing and retrieving context switch count."""
@@ -841,25 +813,13 @@ class TestSessionEnrichmentFields:
         )
         assert rows[0]["context_switch_count"] == 3
 
-    def test_session_with_all_enrichment_fields(self, storage):
-        """Test session with all RFC #26 enrichment fields."""
-        session = Session(
-            id="session-full-enrichment",
-            project_path="project-a",
-            outcome="frustrated",
-            outcome_confidence=0.65,
-            satisfaction_score=0.3,
-            context_switch_count=5,
-        )
+    def test_session_context_switch_default(self, storage):
+        """Test that context_switch_count defaults to 0."""
+        session = Session(id="session-default")
         storage.upsert_session(session)
 
         rows = storage.execute_query(
-            """SELECT outcome, outcome_confidence, satisfaction_score, context_switch_count
-               FROM sessions WHERE id = ?""",
-            ("session-full-enrichment",),
+            "SELECT context_switch_count FROM sessions WHERE id = ?",
+            ("session-default",),
         )
-        assert len(rows) == 1
-        assert rows[0]["outcome"] == "frustrated"
-        assert rows[0]["outcome_confidence"] == 0.65
-        assert rows[0]["satisfaction_score"] == 0.3
-        assert rows[0]["context_switch_count"] == 5
+        assert rows[0]["context_switch_count"] == 0

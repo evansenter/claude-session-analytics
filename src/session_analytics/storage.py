@@ -86,10 +86,7 @@ class Session:
     primary_branch: str | None = None
     slug: str | None = None
 
-    # RFC #26: Session enrichment fields
-    outcome: str | None = None  # 'success', 'abandoned', 'frustrated', 'unknown'
-    outcome_confidence: float | None = None  # 0.0 - 1.0 confidence in outcome
-    satisfaction_score: float | None = None  # 0.0 - 1.0 user satisfaction estimate
+    # RFC #26: Session enrichment fields (observable data only, no interpretation)
     context_switch_count: int = 0  # Number of mid-session topic changes
 
 
@@ -255,23 +252,21 @@ def migrate_v3(conn):
 
 @migration(4, "add_session_enrichment")
 def migrate_v4(conn):
-    """Add columns for RFC #26: session outcome tracking and enrichment.
+    """Add columns for RFC #26: session enrichment with observable data.
 
     Adds:
-    - Session outcome tracking (success, abandoned, frustrated, unknown)
     - Session-commit junction table for time-to-commit metrics
-    - Satisfaction score for user experience tracking
+    - Context switch count for tracking topic changes
+
+    Note: This migration intentionally does NOT add outcome/satisfaction columns.
+    Per RFC #17 design principle: "Don't over-distill - raw data with light
+    structure beats heavily processed summaries. The LLM can handle context."
+    Outcome classification should be done by the consuming LLM, not pre-computed.
     """
     # Check existing session columns
     existing_cols = {row[1] for row in conn.execute("PRAGMA table_info(sessions)")}
 
-    # Add outcome tracking columns to sessions
-    if "outcome" not in existing_cols:
-        conn.execute("ALTER TABLE sessions ADD COLUMN outcome TEXT")
-    if "outcome_confidence" not in existing_cols:
-        conn.execute("ALTER TABLE sessions ADD COLUMN outcome_confidence REAL")
-    if "satisfaction_score" not in existing_cols:
-        conn.execute("ALTER TABLE sessions ADD COLUMN satisfaction_score REAL")
+    # Add observable data columns (no interpretation)
     if "context_switch_count" not in existing_cols:
         conn.execute("ALTER TABLE sessions ADD COLUMN context_switch_count INTEGER DEFAULT 0")
 
@@ -461,10 +456,7 @@ class SQLiteStorage:
                     total_output_tokens INTEGER DEFAULT 0,
                     primary_branch TEXT,
                     slug TEXT,
-                    -- RFC #26: Session enrichment
-                    outcome TEXT,
-                    outcome_confidence REAL,
-                    satisfaction_score REAL,
+                    -- RFC #26: Observable session data (no interpretation)
                     context_switch_count INTEGER DEFAULT 0
                 )
             """)
@@ -766,8 +758,8 @@ class SQLiteStorage:
                     entry_count, tool_use_count,
                     total_input_tokens, total_output_tokens,
                     primary_branch, slug,
-                    outcome, outcome_confidence, satisfaction_score, context_switch_count
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    context_switch_count
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     session.id,
@@ -780,9 +772,6 @@ class SQLiteStorage:
                     session.total_output_tokens,
                     session.primary_branch,
                     session.slug,
-                    session.outcome,
-                    session.outcome_confidence,
-                    session.satisfaction_score,
                     session.context_switch_count,
                 ),
             )
@@ -823,10 +812,7 @@ class SQLiteStorage:
             total_output_tokens=row["total_output_tokens"],
             primary_branch=row["primary_branch"],
             slug=row["slug"],
-            # RFC #26: Session enrichment fields
-            outcome=get_col("outcome"),
-            outcome_confidence=get_col("outcome_confidence"),
-            satisfaction_score=get_col("satisfaction_score"),
+            # RFC #26: Session enrichment (observable data only, no interpretation)
             context_switch_count=get_col("context_switch_count", 0),
         )
 

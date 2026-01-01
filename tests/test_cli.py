@@ -11,15 +11,14 @@ from session_analytics.cli import (
     cmd_commands,
     cmd_frequency,
     cmd_insights,
-    cmd_outcomes,
     cmd_permissions,
     cmd_search,
     cmd_sequences,
     cmd_session_commits,
     cmd_sessions,
+    cmd_signals,
     cmd_status,
     cmd_tokens,
-    cmd_update_outcomes,
     format_output,
 )
 from session_analytics.storage import Event, GitCommit, Session, SQLiteStorage
@@ -390,8 +389,8 @@ class TestCliCommands:
         assert "Search: authentication" in captured.out
         assert "Results:" in captured.out
 
-    def test_cmd_outcomes(self, populated_storage, capsys):
-        """Test outcomes command (RFC #26)."""
+    def test_cmd_signals(self, populated_storage, capsys):
+        """Test signals command (RFC #26, revised per RFC #17)."""
 
         class Args:
             json = False
@@ -400,14 +399,14 @@ class TestCliCommands:
             project = None
 
         with patch("session_analytics.cli.SQLiteStorage", return_value=populated_storage):
-            cmd_outcomes(Args())
+            cmd_signals(Args())
 
         captured = capsys.readouterr()
-        assert "Session Outcomes" in captured.out
-        assert "Outcome distribution:" in captured.out
+        assert "Session Signals" in captured.out
+        assert "Sessions analyzed:" in captured.out
 
-    def test_cmd_outcomes_json(self, populated_storage, capsys):
-        """Test outcomes command with JSON output."""
+    def test_cmd_signals_json(self, populated_storage, capsys):
+        """Test signals command with JSON output."""
 
         class Args:
             json = True
@@ -416,26 +415,11 @@ class TestCliCommands:
             project = None
 
         with patch("session_analytics.cli.SQLiteStorage", return_value=populated_storage):
-            cmd_outcomes(Args())
+            cmd_signals(Args())
 
         captured = capsys.readouterr()
-        assert '"outcome_distribution"' in captured.out
         assert '"sessions_analyzed"' in captured.out
-
-    def test_cmd_update_outcomes(self, populated_storage, capsys):
-        """Test update-outcomes command (RFC #26)."""
-
-        class Args:
-            json = False
-            days = 7
-            project = None
-
-        with patch("session_analytics.cli.SQLiteStorage", return_value=populated_storage):
-            cmd_update_outcomes(Args())
-
-        captured = capsys.readouterr()
-        assert "Updated" in captured.out
-        assert "sessions with outcomes" in captured.out
+        assert '"sessions"' in captured.out
 
     def test_cmd_session_commits(self, populated_storage, capsys):
         """Test session-commits command (RFC #26)."""
@@ -482,58 +466,51 @@ class TestCliCommands:
 
 
 class TestRFC26Formatters:
-    """Tests for RFC #26 output formatters."""
+    """Tests for RFC #26 output formatters (revised per RFC #17 - raw signals only)."""
 
-    def test_outcomes_format(self):
-        """Test outcomes formatting."""
+    def test_signals_format(self):
+        """Test signals formatting (raw data, no interpretation)."""
         data = {
             "days": 7,
             "sessions_analyzed": 5,
-            "outcome_distribution": {
-                "success": 3,
-                "abandoned": 1,
-                "frustrated": 0,
-                "unknown": 1,
-            },
             "sessions": [
                 {
                     "session_id": "session-1-abc",
-                    "outcome": "success",
-                    "confidence": 0.85,
+                    "project_path": "/test",
+                    "event_count": 50,
+                    "error_count": 2,
+                    "edit_count": 10,
+                    "git_count": 5,
+                    "skill_count": 3,
                     "commit_count": 2,
+                    "error_rate": 0.04,
+                    "duration_minutes": 45.0,
+                    "has_rework": False,
+                    "has_pr_activity": True,
                 },
                 {
                     "session_id": "session-2-def",
-                    "outcome": "abandoned",
-                    "confidence": 0.6,
+                    "project_path": "/test",
+                    "event_count": 20,
+                    "error_count": 5,
+                    "edit_count": 8,
+                    "git_count": 1,
+                    "skill_count": 0,
                     "commit_count": 0,
+                    "error_rate": 0.25,
+                    "duration_minutes": 30.0,
+                    "has_rework": True,
+                    "has_pr_activity": False,
                 },
             ],
         }
         result = format_output(data)
-        assert "Session Outcomes" in result
+        assert "Session Signals" in result
         assert "Sessions analyzed: 5" in result
-        assert "success: 3" in result
         assert "session-1-abc" in result
-        assert "85%" in result
-
-    def test_update_outcomes_format(self):
-        """Test update outcomes formatting."""
-        data = {
-            "days": 7,
-            "sessions_detected": 6,
-            "sessions_updated": 5,
-            "errors": 0,
-            "outcome_distribution": {
-                "success": 3,
-                "abandoned": 1,
-                "unknown": 1,
-            },
-        }
-        result = format_output(data)
-        assert "Updated 5 sessions" in result
-        assert "Sessions detected: 6" in result
-        assert "success: 3" in result
+        assert "50 events" in result
+        assert "[PR]" in result
+        assert "[rework]" in result
 
     def test_session_commits_format(self):
         """Test session commits formatting."""
