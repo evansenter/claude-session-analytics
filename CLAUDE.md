@@ -138,28 +138,66 @@ Do this:
 {"error_count": 5, "error_rate": 0.25, "has_rework": True, "commit_count": 0}
 ```
 
-## MCP Tools
+## MCP Tools (27 total)
 
+### Status & Ingestion
 | Tool | Purpose |
 |------|---------|
 | `get_status` | Database stats and last ingestion time |
 | `ingest_logs` | Refresh data from JSONL files |
-| `get_tool_frequency` | Tool usage counts (Read, Edit, Bash, etc.) |
+
+### Core Analytics
+| Tool | Purpose |
+|------|---------|
+| `get_tool_frequency` | Tool usage counts with optional breakdown |
 | `get_session_events` | Events in time window (supports `session_id` filter) |
 | `get_command_frequency` | Bash command breakdown with prefix filter |
-| `list_sessions` | Session metadata and token totals (lists all session IDs) |
+| `list_sessions` | Session metadata and token totals |
 | `get_token_usage` | Token usage by day, session, or model |
-| `get_tool_sequences` | Common tool patterns (n-grams, `length` param for n-gram size) |
+
+### Workflow Analysis
+| Tool | Purpose |
+|------|---------|
+| `get_tool_sequences` | Common tool patterns (n-grams) |
+| `sample_sequences` | Sample instances of a pattern with context |
 | `get_permission_gaps` | Commands needing settings.json entries |
 | `get_insights` | Pre-computed patterns for /improve-workflow |
-| `get_session_messages` | User messages across sessions (supports `session_id` filter) |
-| `search_messages` | Full-text search on user messages (FTS5) |
-| `get_session_signals` | Raw session metrics for LLM interpretation (RFC #26) |
-| `get_session_commits` | Session-commit mappings with timing (RFC #26) |
-| `get_file_activity` | File reads/edits/writes with breakdown |
+
+### File & Project Activity
+| Tool | Purpose |
+|------|---------|
+| `get_file_activity` | File reads/edits/writes breakdown |
 | `get_languages` | Language distribution from file extensions |
 | `get_projects` | Activity across all projects |
 | `get_mcp_usage` | MCP server and tool usage breakdown |
+
+### Session Analysis
+| Tool | Purpose |
+|------|---------|
+| `get_session_signals` | Raw session metrics for LLM interpretation |
+| `classify_sessions` | Categorize sessions (debugging, dev, research) |
+| `analyze_failures` | Error patterns and rework detection |
+| `analyze_trends` | Compare usage across time periods |
+| `get_handoff_context` | Context summary for session handoff |
+
+### User Messages
+| Tool | Purpose |
+|------|---------|
+| `get_session_messages` | User messages across sessions (supports `session_id` filter) |
+| `search_messages` | Full-text search on user messages (FTS5) |
+
+### Session Relationships
+| Tool | Purpose |
+|------|---------|
+| `detect_parallel_sessions` | Find simultaneously active sessions |
+| `find_related_sessions` | Find sessions with similar patterns |
+
+### Git Integration
+| Tool | Purpose |
+|------|---------|
+| `ingest_git_history` | Import git commit history |
+| `correlate_git_with_sessions` | Link commits to sessions by timing |
+| `get_session_commits` | Session-commit mappings with timing
 
 ### Session Discovery and Drill-In Flow
 
@@ -173,28 +211,52 @@ Do this:
 > **Maintainer note**: This discovery flow is also documented in `src/session_analytics/guide.md`
 > (exposed as MCP resource `session-analytics://guide`). Keep both in sync when updating API docs.
 
-## CLI Commands
+## CLI Commands (26 total)
 
 All commands support `--json` for machine-readable output:
 
 ```bash
+# Status & Ingestion
 session-analytics-cli status              # DB stats
 session-analytics-cli ingest --days 30    # Refresh data
+
+# Core Analytics
 session-analytics-cli frequency           # Tool usage (--no-expand to hide breakdowns)
 session-analytics-cli commands --prefix git  # Command breakdown
 session-analytics-cli sessions            # Session info
 session-analytics-cli tokens --by model   # Token usage
+
+# Workflow Analysis
 session-analytics-cli sequences           # Tool chains (--expand for command-level)
+session-analytics-cli sample-sequences    # Sample instances with context
 session-analytics-cli permissions         # Permission gaps
 session-analytics-cli insights            # For /improve-workflow
-session-analytics-cli journey             # User messages across sessions
-session-analytics-cli search <query>      # Full-text search on messages
-session-analytics-cli signals             # Raw session signals (RFC #26)
-session-analytics-cli session-commits     # Session-commit associations (RFC #26)
+
+# File & Project Activity
 session-analytics-cli file-activity       # File reads/edits/writes
 session-analytics-cli languages           # Language distribution
 session-analytics-cli projects            # Cross-project activity
 session-analytics-cli mcp-usage           # MCP server/tool usage
+
+# Session Analysis
+session-analytics-cli signals             # Raw session metrics
+session-analytics-cli classify            # Categorize sessions
+session-analytics-cli failures            # Error patterns and rework
+session-analytics-cli trends              # Compare time periods
+session-analytics-cli handoff             # Session context summary
+
+# User Messages
+session-analytics-cli journey             # User messages across sessions
+session-analytics-cli search <query>      # Full-text search on messages
+
+# Session Relationships
+session-analytics-cli parallel            # Find simultaneous sessions
+session-analytics-cli related <id>        # Find similar sessions
+
+# Git Integration
+session-analytics-cli git-ingest          # Import git history
+session-analytics-cli git-correlate       # Link commits to sessions
+session-analytics-cli session-commits     # Show commits per session
 ```
 
 ### Expand Flags
