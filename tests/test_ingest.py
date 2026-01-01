@@ -12,15 +12,8 @@ from session_analytics.ingest import (
     parse_entry,
     parse_tool_use,
 )
-from session_analytics.storage import SQLiteStorage
 
-
-@pytest.fixture
-def storage():
-    """Create a temporary storage instance for testing."""
-    with tempfile.TemporaryDirectory() as tmpdir:
-        db_path = Path(tmpdir) / "test.db"
-        yield SQLiteStorage(db_path)
+# Uses fixtures from conftest.py: storage
 
 
 @pytest.fixture

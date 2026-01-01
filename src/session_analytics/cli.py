@@ -422,7 +422,7 @@ def _format_handoff_context(data: dict) -> list[str]:
 @_register_formatter(
     lambda d: "sessions_analyzed" in d
     and "sessions" in d
-    and "error_count" in d.get("sessions", [{}])[0]
+    and (len(d.get("sessions", [])) == 0 or "error_count" in d.get("sessions", [{}])[0])
 )
 def _format_signals(data: dict) -> list[str]:
     """Format raw session signals for display."""

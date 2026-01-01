@@ -4,8 +4,6 @@ import tempfile
 from datetime import datetime, timedelta
 from pathlib import Path
 
-import pytest
-
 from session_analytics.patterns import (
     compute_all_patterns,
     compute_command_patterns,
@@ -16,154 +14,17 @@ from session_analytics.patterns import (
     load_allowed_commands,
     sample_sequences,
 )
-from session_analytics.storage import Event, SQLiteStorage
+from session_analytics.storage import Event
 
-
-@pytest.fixture
-def storage():
-    """Create a temporary storage instance for testing."""
-    with tempfile.TemporaryDirectory() as tmpdir:
-        db_path = Path(tmpdir) / "test.db"
-        yield SQLiteStorage(db_path)
-
-
-@pytest.fixture
-def populated_storage(storage):
-    """Create a storage instance with sample data for pattern detection."""
-    now = datetime.now()
-
-    # Add events that will create patterns
-    events = [
-        # Session 1: Read -> Edit -> Bash sequence
-        Event(
-            id=None,
-            uuid="e1",
-            timestamp=now - timedelta(hours=1),
-            session_id="s1",
-            project_path="-test",
-            entry_type="tool_use",
-            tool_name="Read",
-        ),
-        Event(
-            id=None,
-            uuid="e2",
-            timestamp=now - timedelta(hours=1, minutes=-1),
-            session_id="s1",
-            project_path="-test",
-            entry_type="tool_use",
-            tool_name="Edit",
-        ),
-        Event(
-            id=None,
-            uuid="e3",
-            timestamp=now - timedelta(hours=1, minutes=-2),
-            session_id="s1",
-            project_path="-test",
-            entry_type="tool_use",
-            tool_name="Bash",
-            command="git",
-        ),
-        # Session 2: Read -> Edit sequence (same as s1)
-        Event(
-            id=None,
-            uuid="e4",
-            timestamp=now - timedelta(hours=2),
-            session_id="s2",
-            project_path="-test",
-            entry_type="tool_use",
-            tool_name="Read",
-        ),
-        Event(
-            id=None,
-            uuid="e5",
-            timestamp=now - timedelta(hours=2, minutes=-1),
-            session_id="s2",
-            project_path="-test",
-            entry_type="tool_use",
-            tool_name="Edit",
-        ),
-        # Session 3: Read -> Edit sequence (third occurrence)
-        Event(
-            id=None,
-            uuid="e6",
-            timestamp=now - timedelta(hours=3),
-            session_id="s3",
-            project_path="-test",
-            entry_type="tool_use",
-            tool_name="Read",
-        ),
-        Event(
-            id=None,
-            uuid="e7",
-            timestamp=now - timedelta(hours=3, minutes=-1),
-            session_id="s3",
-            project_path="-test",
-            entry_type="tool_use",
-            tool_name="Edit",
-        ),
-        # More Bash commands for permission gap testing
-        Event(
-            id=None,
-            uuid="e8",
-            timestamp=now - timedelta(hours=4),
-            session_id="s1",
-            project_path="-test",
-            entry_type="tool_use",
-            tool_name="Bash",
-            command="make",
-        ),
-        Event(
-            id=None,
-            uuid="e9",
-            timestamp=now - timedelta(hours=4, minutes=-1),
-            session_id="s2",
-            project_path="-test",
-            entry_type="tool_use",
-            tool_name="Bash",
-            command="make",
-        ),
-        Event(
-            id=None,
-            uuid="e10",
-            timestamp=now - timedelta(hours=4, minutes=-2),
-            session_id="s3",
-            project_path="-test",
-            entry_type="tool_use",
-            tool_name="Bash",
-            command="make",
-        ),
-        Event(
-            id=None,
-            uuid="e11",
-            timestamp=now - timedelta(hours=4, minutes=-3),
-            session_id="s1",
-            project_path="-test",
-            entry_type="tool_use",
-            tool_name="Bash",
-            command="make",
-        ),
-        Event(
-            id=None,
-            uuid="e12",
-            timestamp=now - timedelta(hours=4, minutes=-4),
-            session_id="s2",
-            project_path="-test",
-            entry_type="tool_use",
-            tool_name="Bash",
-            command="make",
-        ),
-    ]
-
-    storage.add_events_batch(events)
-    return storage
+# Uses fixtures from conftest.py: storage, pattern_storage
 
 
 class TestToolFrequencyPatterns:
     """Tests for tool frequency pattern detection."""
 
-    def test_compute_tool_frequency(self, populated_storage):
+    def test_compute_tool_frequency(self, pattern_storage):
         """Test computing tool frequency patterns."""
-        patterns = compute_tool_frequency_patterns(populated_storage, days=7)
+        patterns = compute_tool_frequency_patterns(pattern_storage, days=7)
 
         # Should have patterns for Read, Edit, Bash
         pattern_keys = {p.pattern_key for p in patterns}
@@ -171,9 +32,9 @@ class TestToolFrequencyPatterns:
         assert "Edit" in pattern_keys
         assert "Bash" in pattern_keys
 
-    def test_frequency_counts(self, populated_storage):
+    def test_frequency_counts(self, pattern_storage):
         """Test that frequency counts are accurate."""
-        patterns = compute_tool_frequency_patterns(populated_storage, days=7)
+        patterns = compute_tool_frequency_patterns(pattern_storage, days=7)
         pattern_dict = {p.pattern_key: p.count for p in patterns}
 
         assert pattern_dict["Read"] == 3
@@ -184,9 +45,9 @@ class TestToolFrequencyPatterns:
 class TestCommandPatterns:
     """Tests for command pattern detection."""
 
-    def test_compute_command_patterns(self, populated_storage):
+    def test_compute_command_patterns(self, pattern_storage):
         """Test computing command patterns."""
-        patterns = compute_command_patterns(populated_storage, days=7)
+        patterns = compute_command_patterns(pattern_storage, days=7)
 
         pattern_dict = {p.pattern_key: p.count for p in patterns}
         assert pattern_dict.get("git", 0) == 1
@@ -196,30 +57,30 @@ class TestCommandPatterns:
 class TestSequencePatterns:
     """Tests for sequence pattern detection."""
 
-    def test_compute_sequences(self, populated_storage):
+    def test_compute_sequences(self, pattern_storage):
         """Test computing sequence patterns."""
         patterns = compute_sequence_patterns(
-            populated_storage, days=7, sequence_length=2, min_count=2
+            pattern_storage, days=7, sequence_length=2, min_count=2
         )
 
         # Should find Read -> Edit pattern (occurs 3 times)
         pattern_keys = {p.pattern_key for p in patterns}
         assert "Read → Edit" in pattern_keys
 
-    def test_sequence_counts(self, populated_storage):
+    def test_sequence_counts(self, pattern_storage):
         """Test that sequence counts are accurate."""
         patterns = compute_sequence_patterns(
-            populated_storage, days=7, sequence_length=2, min_count=1
+            pattern_storage, days=7, sequence_length=2, min_count=1
         )
 
         pattern_dict = {p.pattern_key: p.count for p in patterns}
         assert pattern_dict["Read → Edit"] == 3
 
-    def test_min_count_filter(self, populated_storage):
+    def test_min_count_filter(self, pattern_storage):
         """Test that min_count filter works."""
         # With min_count=5, should have no sequences
         patterns = compute_sequence_patterns(
-            populated_storage, days=7, sequence_length=2, min_count=5
+            pattern_storage, days=7, sequence_length=2, min_count=5
         )
         assert len(patterns) == 0
 
@@ -243,7 +104,7 @@ class TestPermissionGaps:
             assert "git" in allowed
             assert "make" in allowed
 
-    def test_compute_permission_gaps(self, populated_storage):
+    def test_compute_permission_gaps(self, pattern_storage):
         """Test computing permission gaps."""
         with tempfile.TemporaryDirectory() as tmpdir:
             # Create empty settings.json
@@ -251,21 +112,21 @@ class TestPermissionGaps:
             settings_path.write_text('{"permissions": {"allow": []}}')
 
             patterns = compute_permission_gaps(
-                populated_storage, days=7, threshold=3, settings_path=settings_path
+                pattern_storage, days=7, threshold=3, settings_path=settings_path
             )
 
             # Should find make (5 uses) but maybe not git (1 use) depending on threshold
             pattern_keys = {p.pattern_key for p in patterns}
             assert "make" in pattern_keys
 
-    def test_permission_gaps_respects_allowed(self, populated_storage):
+    def test_permission_gaps_respects_allowed(self, pattern_storage):
         """Test that allowed commands are not reported as gaps."""
         with tempfile.TemporaryDirectory() as tmpdir:
             settings_path = Path(tmpdir) / "settings.json"
             settings_path.write_text('{"permissions": {"allow": ["Bash(make:*)"]}}')
 
             patterns = compute_permission_gaps(
-                populated_storage, days=7, threshold=1, settings_path=settings_path
+                pattern_storage, days=7, threshold=1, settings_path=settings_path
             )
 
             # make is allowed, so should only find git
@@ -277,9 +138,9 @@ class TestPermissionGaps:
 class TestComputeAllPatterns:
     """Tests for computing all patterns."""
 
-    def test_compute_all_patterns(self, populated_storage):
+    def test_compute_all_patterns(self, pattern_storage):
         """Test computing all pattern types."""
-        stats = compute_all_patterns(populated_storage, days=7)
+        stats = compute_all_patterns(pattern_storage, days=7)
 
         assert stats["tool_frequency_patterns"] > 0
         assert stats["command_patterns"] > 0
@@ -289,9 +150,9 @@ class TestComputeAllPatterns:
 class TestGetInsights:
     """Tests for the get_insights function."""
 
-    def test_get_insights(self, populated_storage):
+    def test_get_insights(self, pattern_storage):
         """Test getting insights."""
-        insights = get_insights(populated_storage, refresh=True, days=7)
+        insights = get_insights(pattern_storage, refresh=True, days=7)
 
         assert "tool_frequency" in insights
         assert "command_frequency" in insights
@@ -299,9 +160,9 @@ class TestGetInsights:
         assert "permission_gaps" in insights
         assert "summary" in insights
 
-    def test_insights_summary(self, populated_storage):
+    def test_insights_summary(self, pattern_storage):
         """Test that insights include summary stats."""
-        insights = get_insights(populated_storage, refresh=True, days=7)
+        insights = get_insights(pattern_storage, refresh=True, days=7)
 
         assert "total_tools" in insights["summary"]
         assert "total_commands" in insights["summary"]
@@ -311,42 +172,40 @@ class TestGetInsights:
 class TestSampleSequences:
     """Tests for the sample_sequences function (Phase 2: N-gram Sampling)."""
 
-    def test_sample_sequences_basic(self, populated_storage):
+    def test_sample_sequences_basic(self, pattern_storage):
         """Test sampling a known sequence pattern."""
-        result = sample_sequences(populated_storage, pattern="Read → Edit", days=7)
+        result = sample_sequences(pattern_storage, pattern="Read → Edit", days=7)
 
         assert result["pattern"] == "Read → Edit"
         assert result["parsed_tools"] == ["Read", "Edit"]
         assert result["total_occurrences"] == 3  # 3 Read -> Edit sequences
         assert result["sample_count"] <= 5  # Default sample size
 
-    def test_sample_sequences_comma_separator(self, populated_storage):
+    def test_sample_sequences_comma_separator(self, pattern_storage):
         """Test that comma separator also works."""
-        result = sample_sequences(populated_storage, pattern="Read,Edit", days=7)
+        result = sample_sequences(pattern_storage, pattern="Read,Edit", days=7)
 
         assert result["parsed_tools"] == ["Read", "Edit"]
         assert result["total_occurrences"] == 3
 
-    def test_sample_sequences_with_context(self, populated_storage):
+    def test_sample_sequences_with_context(self, pattern_storage):
         """Test that context events are included."""
-        result = sample_sequences(
-            populated_storage, pattern="Read → Edit", context_events=1, days=7
-        )
+        result = sample_sequences(pattern_storage, pattern="Read → Edit", context_events=1, days=7)
 
         # Each sample should have events
         for sample in result["samples"]:
             assert "events" in sample
             assert len(sample["events"]) >= 2  # At least the matched pattern
 
-    def test_sample_sequences_limits_count(self, populated_storage):
+    def test_sample_sequences_limits_count(self, pattern_storage):
         """Test that count parameter limits samples."""
-        result = sample_sequences(populated_storage, pattern="Read → Edit", count=1, days=7)
+        result = sample_sequences(pattern_storage, pattern="Read → Edit", count=1, days=7)
 
         assert result["sample_count"] == 1
 
-    def test_sample_sequences_no_match(self, populated_storage):
+    def test_sample_sequences_no_match(self, pattern_storage):
         """Test with a pattern that doesn't exist."""
-        result = sample_sequences(populated_storage, pattern="Write → Grep", days=7)
+        result = sample_sequences(pattern_storage, pattern="Write → Grep", days=7)
 
         assert result["total_occurrences"] == 0
         assert result["sample_count"] == 0
@@ -430,11 +289,9 @@ class TestSampleSequences:
         assert "git" in commands
         assert "make" in commands
 
-    def test_sample_sequences_marks_match_events(self, populated_storage):
+    def test_sample_sequences_marks_match_events(self, pattern_storage):
         """Test that matched events are marked with is_match=True."""
-        result = sample_sequences(
-            populated_storage, pattern="Read → Edit", context_events=1, days=7
-        )
+        result = sample_sequences(pattern_storage, pattern="Read → Edit", context_events=1, days=7)
 
         for sample in result["samples"]:
             matched_events = [e for e in sample["events"] if e.get("is_match")]

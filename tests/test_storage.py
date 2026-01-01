@@ -1,8 +1,6 @@
 """Tests for the SQLite storage layer."""
 
-import tempfile
 from datetime import datetime, timedelta
-from pathlib import Path
 
 import pytest
 
@@ -12,35 +10,9 @@ from session_analytics.storage import (
     IngestionState,
     Pattern,
     Session,
-    SQLiteStorage,
 )
 
-
-@pytest.fixture
-def storage():
-    """Create a temporary storage instance for testing."""
-    with tempfile.TemporaryDirectory() as tmpdir:
-        db_path = Path(tmpdir) / "test.db"
-        yield SQLiteStorage(db_path)
-
-
-@pytest.fixture
-def sample_event():
-    """Create a sample event for testing."""
-    return Event(
-        id=None,
-        uuid="test-uuid-12345",
-        timestamp=datetime(2025, 1, 1, 12, 0, 0),
-        session_id="session-abc123",
-        project_path="/encoded/project/path",
-        entry_type="assistant",
-        tool_name="Bash",
-        tool_input_json='{"command": "git status"}',
-        tool_id="tool-123",
-        is_error=False,
-        command="git",
-        command_args="status",
-    )
+# Uses fixtures from conftest.py: storage, sample_event
 
 
 class TestEventOperations:
