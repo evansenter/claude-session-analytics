@@ -1,5 +1,7 @@
 # Session Analytics Usage Guide
 
+> **Tip:** Read this guide via the MCP resource `session-analytics://guide` for usage patterns and best practices.
+
 ## What is this?
 
 Session Analytics provides queryable analytics on Claude Code session logs. It parses
