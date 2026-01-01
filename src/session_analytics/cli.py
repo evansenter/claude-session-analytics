@@ -78,14 +78,11 @@ def _format_tool_frequency(data: dict) -> list[str]:
         "",
         "Tool frequency:",
     ]
-    for tool in data.get("tools", [])[:20]:
+    for tool in data.get("tools", []):
         lines.append(f"  {tool['tool']}: {tool['count']}")
         # Show breakdown if present (for Skill, Task, Bash)
-        breakdown = tool.get("breakdown", [])
-        for item in breakdown[:8]:  # Limit breakdown items
+        for item in tool.get("breakdown", []):
             lines.append(f"    └ {item['name']}: {item['count']}")
-        if len(breakdown) > 8:
-            lines.append(f"    └ ... and {len(breakdown) - 8} more")
     return lines
 
 
@@ -98,7 +95,7 @@ def _format_commands(data: dict) -> list[str]:
         "",
         "Command frequency:",
     ]
-    for cmd in data.get("commands", [])[:20]:
+    for cmd in data.get("commands", []):
         lines.append(f"  {cmd['command']}: {cmd['count']}")
     return lines
 
@@ -126,7 +123,7 @@ def _format_tokens(data: dict) -> list[str]:
         f"Total output: {data['total_output_tokens']:,}",
         "",
     ]
-    for item in data["breakdown"][:20]:
+    for item in data["breakdown"]:
         key = item.get("day") or item.get("session_id") or item.get("model")
         lines.append(f"  {key}: {item['input_tokens']} in / {item['output_tokens']} out")
     return lines
@@ -155,7 +152,7 @@ def _format_sequences(data: dict) -> list[str]:
         "",
         "Sequences:",
     ]
-    for seq in data.get("sequences", [])[:20]:
+    for seq in data.get("sequences", []):
         lines.append(f"  {seq['pattern']}: {seq['count']}")
     return lines
 
@@ -167,7 +164,7 @@ def _format_gaps(data: dict) -> list[str]:
         "",
         "Permission gaps:",
     ]
-    for gap in data.get("gaps", [])[:20]:
+    for gap in data.get("gaps", []):
         lines.append(f"  {gap['command']}: {gap['count']} uses -> {gap['suggestion']}")
     return lines
 
@@ -266,18 +263,14 @@ def _format_user_journey(data: dict) -> list[str]:
         lines.append(f"Project switches: {data.get('project_switches', 0)}")
     lines.append("")
 
-    for event in data.get("journey", [])[:20]:
+    for event in data.get("journey", []):
         ts = event.get("timestamp", "")[:16] if event.get("timestamp") else "unknown"
         msg = event.get("message", "") if event.get("message") else ""
-        if len(msg) > 60:
-            msg = msg[:57] + "..."
         project = event.get("project", "")
         if project:
             lines.append(f"  [{ts}] ({project}) {msg}")
         else:
             lines.append(f"  [{ts}] {msg}")
-    if len(data.get("journey", [])) > 20:
-        lines.append(f"  ... and {len(data['journey']) - 20} more")
     return lines
 
 
@@ -288,18 +281,14 @@ def _format_search_results(data: dict) -> list[str]:
         f"Results: {data['count']}",
         "",
     ]
-    for msg in data.get("messages", [])[:20]:
+    for msg in data.get("messages", []):
         ts = msg.get("timestamp", "")[:16] if msg.get("timestamp") else "unknown"
         text = msg.get("message", "") if msg.get("message") else ""
-        if len(text) > 60:
-            text = text[:57] + "..."
         project = msg.get("project", "")
         if project:
             lines.append(f"  [{ts}] ({project}) {text}")
         else:
             lines.append(f"  [{ts}] {text}")
-    if len(data.get("messages", [])) > 20:
-        lines.append(f"  ... and {len(data['messages']) - 20} more")
     return lines
 
 
@@ -459,17 +448,15 @@ def _format_signals(data: dict) -> list[str]:
         f"Sessions analyzed: {data['sessions_analyzed']} (last {data['days']} days)",
         "",
     ]
-    for sess in data.get("sessions", [])[:15]:
+    for sess in data.get("sessions", []):
         commit_info = f", {sess['commit_count']} commits" if sess.get("commit_count") else ""
         error_info = f", {sess['error_rate']:.0%} errors" if sess.get("error_rate", 0) > 0 else ""
         rework = " [rework]" if sess.get("has_rework") else ""
         pr = " [PR]" if sess.get("has_pr_activity") else ""
         lines.append(
-            f"  {sess['session_id'][:16]} - {sess['event_count']} events, "
+            f"  {sess['session_id']} - {sess['event_count']} events, "
             f"{sess['duration_minutes']:.0f}m{commit_info}{error_info}{rework}{pr}"
         )
-    if len(data.get("sessions", [])) > 15:
-        lines.append(f"  ... and {len(data['sessions']) - 15} more")
     return lines
 
 
@@ -483,17 +470,15 @@ def _format_session_commits(data: dict) -> list[str]:
     if data.get("session_id"):
         lines.insert(1, f"Session: {data['session_id']}")
 
-    for commit in data.get("commits", [])[:20]:
-        sha = commit.get("sha", "")[:8]
+    for commit in data.get("commits", []):
+        sha = commit.get("sha", "")
         time_to = commit.get("time_to_commit_seconds", 0)
         first = " (first)" if commit.get("is_first_commit") else ""
-        session = commit.get("session_id", "")[:12] if not data.get("session_id") else ""
+        session = commit.get("session_id", "") if not data.get("session_id") else ""
         if session:
             lines.append(f"  {sha} - {time_to}s{first} [{session}]")
         else:
             lines.append(f"  {sha} - {time_to}s{first}")
-    if len(data.get("commits", [])) > 20:
-        lines.append(f"  ... and {len(data['commits']) - 20} more")
     return lines
 
 

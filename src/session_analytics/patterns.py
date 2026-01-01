@@ -1014,7 +1014,6 @@ def analyze_trends(
             WHERE timestamp >= ? AND timestamp < ? AND tool_name IS NOT NULL
             GROUP BY tool_name
             ORDER BY count DESC
-            LIMIT 10
             """,
             (start, end),
         )

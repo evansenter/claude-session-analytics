@@ -743,7 +743,7 @@ def detect_parallel_sessions(
         "min_overlap_minutes": min_overlap_minutes,
         "total_sessions": len(sessions),
         "parallel_period_count": len(parallel_periods),
-        "parallel_periods": parallel_periods[:20],  # Limit to top 20
+        "parallel_periods": parallel_periods,
     }
 
 
