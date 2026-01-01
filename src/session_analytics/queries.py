@@ -53,6 +53,20 @@ def build_where_clause(
     return where_clause, params
 
 
+def get_cutoff(days: int | float = 7, hours: float = 0) -> datetime:
+    """Calculate cutoff datetime from days/hours ago.
+
+    Args:
+        days: Number of days to look back (can be fractional)
+        hours: Additional hours to look back
+
+    Returns:
+        datetime representing the cutoff point
+    """
+    total_hours = (days * 24) + hours
+    return datetime.now() - timedelta(hours=total_hours)
+
+
 def ensure_fresh_data(
     storage: SQLiteStorage,
     max_age_minutes: int = 5,
@@ -105,7 +119,7 @@ def query_tool_frequency(
     Returns:
         Dict with tool frequency breakdown
     """
-    cutoff = datetime.now() - timedelta(days=days)
+    cutoff = get_cutoff(days=days)
     where_clause, params = build_where_clause(
         cutoff=cutoff,
         project=project,
@@ -257,7 +271,7 @@ def query_timeline(
         Dict with timeline events
     """
     if start is None:
-        start = datetime.now() - timedelta(hours=24)
+        start = get_cutoff(days=1)
     if end is None:
         end = datetime.now()
 
@@ -310,7 +324,7 @@ def query_commands(
     Returns:
         Dict with command breakdown
     """
-    cutoff = datetime.now() - timedelta(days=days)
+    cutoff = get_cutoff(days=days)
     where_clause, params = build_where_clause(
         cutoff=cutoff,
         project=project,
@@ -360,7 +374,7 @@ def query_sessions(
     Returns:
         Dict with session information
     """
-    cutoff = datetime.now() - timedelta(days=days)
+    cutoff = get_cutoff(days=days)
     where_clause, params = build_where_clause(
         cutoff=cutoff,
         cutoff_column="last_seen",
@@ -431,7 +445,7 @@ def query_tokens(
     Returns:
         Dict with token usage breakdown
     """
-    cutoff = datetime.now() - timedelta(days=days)
+    cutoff = get_cutoff(days=days)
     where_clause, params = build_where_clause(
         cutoff=cutoff,
         project=project,
@@ -583,7 +597,7 @@ def get_user_journey(
     Returns:
         Dict with journey events and pattern analysis
     """
-    cutoff = datetime.now() - timedelta(hours=hours)
+    cutoff = get_cutoff(hours=hours)
 
     # Build query with optional session_id filter
     session_filter = ""
@@ -663,7 +677,7 @@ def detect_parallel_sessions(
     Returns:
         Dict with parallel session periods and analysis
     """
-    cutoff = datetime.now() - timedelta(hours=hours)
+    cutoff = get_cutoff(hours=hours)
 
     # Get session activity ranges
     rows = storage.execute_query(
@@ -768,7 +782,7 @@ def find_related_sessions(
     Returns:
         Dict with related sessions and their connection strength
     """
-    cutoff = datetime.now() - timedelta(days=days)
+    cutoff = get_cutoff(days=days)
 
     if method == "files":
         # Find sessions that touched the same files
@@ -970,7 +984,7 @@ def classify_sessions(
     Returns:
         Dict with session classifications and category distribution
     """
-    cutoff = datetime.now() - timedelta(days=days)
+    cutoff = get_cutoff(days=days)
 
     # Build where clause
     where_parts = ["timestamp >= ?"]
@@ -1102,7 +1116,7 @@ def get_handoff_context(
     Returns:
         Dict with handoff context including messages, files, and activity summary
     """
-    cutoff = datetime.now() - timedelta(hours=hours)
+    cutoff = get_cutoff(hours=hours)
 
     # If no session specified, get the most recent session
     if not session_id:
@@ -1271,7 +1285,7 @@ def query_file_activity(
     Returns:
         File activity data with read/edit/write breakdown
     """
-    cutoff = datetime.now() - timedelta(days=days)
+    cutoff = get_cutoff(days=days)
     where_clause, params = build_where_clause(
         cutoff=cutoff,
         project=project,
@@ -1349,7 +1363,7 @@ def query_languages(
     Returns:
         Language distribution data
     """
-    cutoff = datetime.now() - timedelta(days=days)
+    cutoff = get_cutoff(days=days)
     where_clause, params = build_where_clause(
         cutoff=cutoff,
         project=project,
@@ -1428,7 +1442,7 @@ def query_projects(
     Returns:
         Project activity data with event counts and session counts per project
     """
-    cutoff = datetime.now() - timedelta(days=days)
+    cutoff = get_cutoff(days=days)
 
     rows = storage.execute_query(
         """
@@ -1489,7 +1503,7 @@ def query_mcp_usage(
     Returns:
         MCP usage data by server and tool
     """
-    cutoff = datetime.now() - timedelta(days=days)
+    cutoff = get_cutoff(days=days)
     where_clause, params = build_where_clause(
         cutoff=cutoff,
         project=project,

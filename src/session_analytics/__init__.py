@@ -8,6 +8,7 @@ except Exception:
     __version__ = "0.1.0"  # Fallback for development
 
 # Re-export public API
+from session_analytics.queries import build_where_clause, get_cutoff
 from session_analytics.storage import (
     Event,
     GitCommit,
@@ -27,4 +28,7 @@ __all__ = [
     "Pattern",
     "IngestionState",
     "GitCommit",
+    # Query helpers
+    "build_where_clause",
+    "get_cutoff",
 ]

@@ -7,6 +7,7 @@ from collections import Counter
 from datetime import datetime, timedelta
 from pathlib import Path
 
+from session_analytics.queries import get_cutoff
 from session_analytics.storage import Pattern, SQLiteStorage
 
 logger = logging.getLogger("session-analytics")
@@ -28,7 +29,7 @@ def compute_tool_frequency_patterns(
     Returns:
         List of tool frequency patterns
     """
-    cutoff = datetime.now() - timedelta(days=days)
+    cutoff = get_cutoff(days=days)
     now = datetime.now()
 
     rows = storage.execute_query(
@@ -72,7 +73,7 @@ def compute_command_patterns(
     Returns:
         List of command patterns
     """
-    cutoff = datetime.now() - timedelta(days=days)
+    cutoff = get_cutoff(days=days)
     now = datetime.now()
 
     rows = storage.execute_query(
@@ -123,7 +124,7 @@ def compute_sequence_patterns(
     Returns:
         List of sequence patterns
     """
-    cutoff = datetime.now() - timedelta(days=days)
+    cutoff = get_cutoff(days=days)
     now = datetime.now()
 
     # Get all tool events ordered by session and timestamp
@@ -223,7 +224,7 @@ def sample_sequences(
     Returns:
         Dict with pattern info, total occurrences, and sampled instances
     """
-    cutoff = datetime.now() - timedelta(days=days)
+    cutoff = get_cutoff(days=days)
 
     # Validate pattern input
     if len(pattern) > 500:
@@ -399,7 +400,7 @@ def analyze_failures(
     Returns:
         Dict with failure analysis including error counts, rework patterns, recovery times
     """
-    cutoff = datetime.now() - timedelta(days=days)
+    cutoff = get_cutoff(days=days)
 
     # Get all error events
     error_rows = storage.execute_query(
@@ -597,7 +598,7 @@ def compute_permission_gaps(
     Returns:
         List of permission gap patterns
     """
-    cutoff = datetime.now() - timedelta(days=days)
+    cutoff = get_cutoff(days=days)
     now = datetime.now()
 
     allowed_commands = load_allowed_commands(settings_path)
@@ -816,7 +817,7 @@ def get_session_signals(
     Returns:
         Dict with raw session signals for LLM interpretation
     """
-    cutoff = datetime.now() - timedelta(days=days)
+    cutoff = get_cutoff(days=days)
 
     # Build optional project filter
     project_filter = ""

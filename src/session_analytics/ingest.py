@@ -5,6 +5,7 @@ import logging
 from datetime import datetime, timedelta
 from pathlib import Path
 
+from session_analytics.queries import get_cutoff
 from session_analytics.storage import Event, GitCommit, IngestionState, Session, SQLiteStorage
 
 logger = logging.getLogger("session-analytics")
@@ -35,7 +36,7 @@ def find_log_files(
         logger.warning(f"Logs directory does not exist: {logs_dir}")
         return []
 
-    cutoff = datetime.now() - timedelta(days=days)
+    cutoff = get_cutoff(days=days)
     files = []
 
     for project_dir in logs_dir.iterdir():
@@ -507,7 +508,7 @@ def ingest_git_history(
         }
 
     # Get commits from the last N days
-    since_date = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
+    since_date = get_cutoff(days=days).strftime("%Y-%m-%d")
 
     try:
         # Git log format: hash|author|date|subject
@@ -610,7 +611,7 @@ def correlate_git_with_sessions(
     Returns:
         Dict with correlation stats
     """
-    cutoff = datetime.now() - timedelta(days=days)
+    cutoff = get_cutoff(days=days)
 
     # Get session time ranges
     sessions = storage.execute_query(

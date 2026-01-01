@@ -5,39 +5,24 @@ import json
 import sqlite3
 
 from session_analytics.ingest import (
-    correlate_git_with_sessions as do_correlate_git,
-)
-from session_analytics.ingest import (
-    ingest_git_history as do_ingest_git,
-)
-from session_analytics.ingest import (
+    correlate_git_with_sessions,
+    ingest_git_history,
     ingest_logs,
 )
 from session_analytics.patterns import (
-    analyze_failures as do_analyze_failures,
-)
-from session_analytics.patterns import (
-    analyze_trends as do_analyze_trends,
-)
-from session_analytics.patterns import (
+    analyze_failures,
+    analyze_trends,
     compute_permission_gaps,
     compute_sequence_patterns,
-)
-from session_analytics.patterns import (
-    get_insights as do_get_insights,
-)
-from session_analytics.patterns import (
-    get_session_signals as do_get_signals,
-)
-from session_analytics.patterns import (
-    sample_sequences as do_sample_sequences,
+    get_insights,
+    get_session_signals,
+    sample_sequences,
 )
 from session_analytics.queries import (
-    classify_sessions as do_classify_sessions,
-)
-from session_analytics.queries import (
+    classify_sessions,
     detect_parallel_sessions,
     find_related_sessions,
+    get_handoff_context,
     get_user_journey,
     query_commands,
     query_file_activity,
@@ -47,9 +32,6 @@ from session_analytics.queries import (
     query_sessions,
     query_tokens,
     query_tool_frequency,
-)
-from session_analytics.queries import (
-    get_handoff_context as do_get_handoff_context,
 )
 from session_analytics.storage import SQLiteStorage
 
@@ -651,7 +633,7 @@ def cmd_mcp_usage(args):
 def cmd_insights(args):
     """Show insights for /improve-workflow."""
     storage = SQLiteStorage()
-    result = do_get_insights(
+    result = get_insights(
         storage,
         refresh=args.refresh,
         days=args.days,
@@ -663,7 +645,7 @@ def cmd_insights(args):
 def cmd_sample_sequences(args):
     """Show sampled sequence instances."""
     storage = SQLiteStorage()
-    result = do_sample_sequences(
+    result = sample_sequences(
         storage,
         pattern=args.pattern,
         count=args.limit,
@@ -747,7 +729,7 @@ def cmd_related(args):
 def cmd_failures(args):
     """Show failure analysis."""
     storage = SQLiteStorage()
-    result = do_analyze_failures(
+    result = analyze_failures(
         storage,
         days=args.days,
         rework_window_minutes=args.rework_window,
@@ -758,7 +740,7 @@ def cmd_failures(args):
 def cmd_classify(args):
     """Show session classifications."""
     storage = SQLiteStorage()
-    result = do_classify_sessions(
+    result = classify_sessions(
         storage,
         days=args.days,
         project=args.project,
@@ -770,7 +752,7 @@ def cmd_handoff(args):
     """Show handoff context for a session."""
     storage = SQLiteStorage()
     hours = int(args.days * 24)
-    result = do_get_handoff_context(
+    result = get_handoff_context(
         storage,
         session_id=args.session_id,
         hours=hours,
@@ -782,7 +764,7 @@ def cmd_handoff(args):
 def cmd_trends(args):
     """Show trend analysis."""
     storage = SQLiteStorage()
-    result = do_analyze_trends(
+    result = analyze_trends(
         storage,
         days=args.days,
         compare_to=args.compare_to,
@@ -793,7 +775,7 @@ def cmd_trends(args):
 def cmd_git_ingest(args):
     """Ingest git history."""
     storage = SQLiteStorage()
-    result = do_ingest_git(
+    result = ingest_git_history(
         storage,
         repo_path=args.repo_path,
         days=args.days,
@@ -805,7 +787,7 @@ def cmd_git_ingest(args):
 def cmd_git_correlate(args):
     """Correlate git commits with sessions."""
     storage = SQLiteStorage()
-    result = do_correlate_git(
+    result = correlate_git_with_sessions(
         storage,
         days=args.days,
     )
@@ -815,7 +797,7 @@ def cmd_git_correlate(args):
 def cmd_signals(args):
     """Show raw session signals for LLM interpretation (RFC #26, revised per RFC #17)."""
     storage = SQLiteStorage()
-    result = do_get_signals(
+    result = get_session_signals(
         storage,
         days=args.days,
         min_count=args.min_count,
