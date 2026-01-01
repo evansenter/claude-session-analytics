@@ -181,14 +181,9 @@ def _format_file_activity(data: dict) -> list[str]:
         f"Files touched: {data['file_count']}",
         "",
     ]
-    # Header
-    lines.append(f"{'FILE':<60} {'TOTAL':>6} {'READ':>5} {'EDIT':>5} {'WRITE':>5}")
-    for f in data.get("files", [])[:20]:
-        # Shorten path for display
-        path = f["file"]
-        if len(path) > 58:
-            path = "..." + path[-55:]
-        lines.append(f"{path:<60} {f['total']:>6} {f['reads']:>5} {f['edits']:>5} {f['writes']:>5}")
+    for f in data.get("files", []):
+        lines.append(f"  {f['file']}")
+        lines.append(f"    total: {f['total']}  read: {f['reads']}  edit: {f['edits']}  write: {f['writes']}")
     return lines
 
 
