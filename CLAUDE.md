@@ -30,11 +30,25 @@ Key components:
 ## Commands
 
 ```bash
-make check      # Run fmt, lint, test (84 tests)
+make check      # Run fmt, lint, test
 make install    # Install LaunchAgent + CLI
 make uninstall  # Remove LaunchAgent + CLI
+make restart    # Restart LaunchAgent to pick up code changes
 make dev        # Run in dev mode with auto-reload
 ```
+
+### When to restart
+
+The LaunchAgent runs the installed Python code. After making changes, you need to restart for them to take effect:
+
+| Change type | Restart needed? |
+|-------------|-----------------|
+| MCP tools (`server.py`) | Yes - `make restart` |
+| Query/pattern logic (`queries.py`, `patterns.py`) | Yes - `make restart` |
+| Storage/migrations (`storage.py`) | Yes - `make restart` |
+| CLI only (`cli.py`) | No - CLI runs fresh each time |
+| Tests | No - pytest runs fresh |
+| Documentation (`guide.md`, `CLAUDE.md`) | No |
 
 ## Key Files
 

@@ -1,4 +1,4 @@
-.PHONY: check fmt lint test clean install uninstall dev venv
+.PHONY: check fmt lint test clean install uninstall restart dev venv
 
 # Run all quality gates (format check, lint, tests)
 check: fmt lint test
@@ -55,6 +55,25 @@ install: venv
 	@echo ""
 	@echo "Make sure ~/.local/bin is in your PATH:"
 	@echo '  export PATH="$$HOME/.local/bin:$$PATH"'
+
+# Restart the LaunchAgent (pick up code changes)
+restart:
+	@PLIST="$$HOME/Library/LaunchAgents/com.evansenter.claude-session-analytics.plist"; \
+	if [ -f "$$PLIST" ]; then \
+		echo "Restarting session-analytics..."; \
+		launchctl unload "$$PLIST" 2>/dev/null || true; \
+		launchctl load "$$PLIST"; \
+		sleep 1; \
+		if launchctl list | grep -q "com.evansenter.claude-session-analytics"; then \
+			echo "Service restarted successfully"; \
+		else \
+			echo "Error: Service failed to start. Check ~/.claude/session-analytics.err"; \
+			exit 1; \
+		fi; \
+	else \
+		echo "LaunchAgent not installed. Run: make install"; \
+		exit 1; \
+	fi
 
 # Uninstall: LaunchAgent + CLI + MCP config
 uninstall:
