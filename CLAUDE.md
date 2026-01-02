@@ -2,6 +2,8 @@
 
 Queryable analytics for Claude Code session logs, exposed as an MCP server and CLI.
 
+**Related**: [claude-event-bus](https://github.com/evansenter/claude-event-bus) shares design patterns with this project.
+
 ## Project Overview
 
 This MCP server replaces the bash script `~/.claude/contrib/parse-session-logs.sh` with a persistent, queryable analytics layer. It parses JSONL session logs from `~/.claude/projects/` and provides:
@@ -91,7 +93,14 @@ The install is editable (`pip install -e .`), so Python code changes are picked 
 - **Formatter Registry**: CLI uses `@_register_formatter(predicate)` decorator pattern
 - **Schema Migrations**: Use `@migration(version, name)` decorator in storage.py for DB changes
 - **Module Imports**: server.py uses `from session_analytics import queries, patterns, ingest`
-- **CLI/MCP Parity**: Always expose new query functions on both CLI and MCP. Add MCP tool in `server.py`, CLI command in `cli.py`, document in both `guide.md` and this file
+- **CLI/MCP Parity**: Always expose new query functions on both CLI and MCP
+
+**When modifying the API**: Update all discovery surfaces together:
+1. **CLI command** - in `cli.py` (visible via `session-analytics-cli --help`)
+2. **MCP tool** - in `server.py` (visible to CC via tool inspection)
+3. **Usage guide** - `guide.md` (served as `session-analytics://guide` resource)
+4. **CLAUDE.md** - This file, for codebase context
+5. **~/.claude/contrib/README.md** - User's local contrib directory (lists MCP server data locations)
 
 ## MCP API Naming Conventions
 
@@ -295,6 +304,10 @@ session-analytics-cli ingest --days 1 --json 2>/dev/null || true
 **Sessions table**: Aggregated session metadata
 **Patterns table**: Pre-computed patterns for fast querying
 **Ingested files table**: Tracks file mtime/size for incremental updates
+
+## Related
+
+- [claude-event-bus](https://github.com/evansenter/claude-event-bus) - Cross-session communication for Claude Code
 
 ## Reference
 

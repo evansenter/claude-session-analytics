@@ -19,6 +19,10 @@ rm -f "$PLIST_DEST"
 
 echo "Session analytics LaunchAgent uninstalled."
 
+# Also uninstall CLI
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+"$SCRIPT_DIR/uninstall-cli.sh"
+
 echo ""
-echo "Note: Logs remain at ~/.claude/session-analytics.log"
+echo "Note: Data remains at ~/.claude/contrib/analytics/"
 osascript -e 'display notification "LaunchAgent uninstalled" with title "Session Analytics"' 2>/dev/null

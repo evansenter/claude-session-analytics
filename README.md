@@ -2,6 +2,8 @@
 
 MCP server and CLI for queryable analytics on Claude Code session logs.
 
+**Related**: [claude-event-bus](https://github.com/evansenter/claude-event-bus) shares design patterns with this project.
+
 ## What It Does
 
 Parses your Claude Code session logs (`~/.claude/projects/**/*.jsonl`) and provides:
@@ -258,6 +260,10 @@ Key patterns used in the codebase:
 - **Schema Migrations**: `@migration(version, name)` decorator for future DB schema changes
 
 See `CLAUDE.md` for more details on contributing.
+
+## Related
+
+- [claude-event-bus](https://github.com/evansenter/claude-event-bus) - Cross-session communication for Claude Code
 
 ## Uninstall
 
