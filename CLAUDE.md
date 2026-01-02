@@ -46,6 +46,13 @@ Key components:
 - `make uninstall` - OK, preserves database (only removes LaunchAgent + MCP config)
 - `make reinstall` - OK, just reinstalls Python package
 
+### Before schema/migration changes:
+**ALWAYS back up the database before making schema or migration changes:**
+```bash
+cp ~/.claude/contrib/analytics/data.db ~/.claude/contrib/analytics/data.db.backup-$(date +%Y%m%d-%H%M%S)
+```
+Migrations can have subtle bugs (race conditions, incorrect data transforms) that corrupt data irreversibly.
+
 ### If you need to test destructive operations:
 Use a temporary database in tests (all tests already do this via `tmpdir`).
 
