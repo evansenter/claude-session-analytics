@@ -144,6 +144,7 @@ Checklist for adding a new query:
 | `get_*` | Retrieve with filters | `get_session_events()` |
 | `search_*` | Full-text search | `search_messages()` |
 | `analyze_*` | Compute insights | `analyze_failures()` |
+| `ingest_*` | Load/import data | `ingest_logs()` |
 
 | Arg | Standard Name |
 |-----|---------------|
