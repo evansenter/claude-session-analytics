@@ -834,3 +834,151 @@ class TestSessionEnrichmentFields:
             ("session-default",),
         )
         assert rows[0]["context_switch_count"] == 0
+
+
+class TestAgentTrackingFields:
+    """Tests for RFC #41: Agent tracking and token deduplication.
+
+    These tests verify the new fields for tracking Task subagent activity:
+    - parent_uuid: Links tool_use events to their assistant event
+    - agent_id: Agent ID from agent-*.jsonl files
+    - is_sidechain: Boolean for agent/background work
+    - version: Claude Code version
+    """
+
+    def test_event_with_agent_fields(self, storage):
+        """Test storing and retrieving event with agent tracking fields."""
+        event = Event(
+            id=None,
+            uuid="agent-event-1",
+            timestamp=datetime.now(),
+            session_id="session-1",
+            entry_type="assistant",
+            parent_uuid=None,
+            agent_id="a123456",
+            is_sidechain=True,
+            version="2.0.76",
+            input_tokens=100,
+        )
+        storage.add_event(event)
+
+        events = storage.get_events_in_range(session_id="session-1")
+        assert len(events) == 1
+        assert events[0].agent_id == "a123456"
+        assert events[0].is_sidechain is True
+        assert events[0].version == "2.0.76"
+
+    def test_tool_use_with_parent_uuid(self, storage):
+        """Test storing tool_use event linked to parent via parent_uuid."""
+        # First add assistant event
+        assistant = Event(
+            id=None,
+            uuid="parent-assist-1",
+            timestamp=datetime.now(),
+            session_id="session-1",
+            entry_type="assistant",
+            input_tokens=100,
+        )
+        storage.add_event(assistant)
+
+        # Add tool_use event referencing parent
+        tool = Event(
+            id=None,
+            uuid="child-tool-1",
+            timestamp=datetime.now(),
+            session_id="session-1",
+            entry_type="tool_use",
+            parent_uuid="parent-assist-1",
+            tool_name="Bash",
+            input_tokens=None,  # No tokens on tool_use (deduplication)
+        )
+        storage.add_event(tool)
+
+        events = storage.get_events_in_range(session_id="session-1")
+        tool_event = [e for e in events if e.entry_type == "tool_use"][0]
+        assert tool_event.parent_uuid == "parent-assist-1"
+        assert tool_event.input_tokens is None
+
+    def test_event_with_null_agent_fields(self, storage):
+        """Test event with NULL agent fields (main session events)."""
+        event = Event(
+            id=None,
+            uuid="main-event-1",
+            timestamp=datetime.now(),
+            session_id="session-1",
+            entry_type="assistant",
+            # agent_id and parent_uuid are None by default
+            is_sidechain=False,  # Main session
+        )
+        storage.add_event(event)
+
+        events = storage.get_events_in_range(session_id="session-1")
+        assert len(events) == 1
+        assert events[0].agent_id is None
+        assert events[0].parent_uuid is None
+        assert events[0].is_sidechain is False
+
+    def test_is_sidechain_default(self, storage):
+        """Test that is_sidechain defaults to False."""
+        event = Event(
+            id=None,
+            uuid="default-sidechain",
+            timestamp=datetime.now(),
+            session_id="session-1",
+            entry_type="assistant",
+        )
+        storage.add_event(event)
+
+        events = storage.get_events_in_range(session_id="session-1")
+        assert events[0].is_sidechain is False
+
+    def test_batch_add_with_agent_fields(self, storage):
+        """Test batch adding events with agent tracking fields."""
+        events = [
+            Event(
+                id=None,
+                uuid="batch-agent-1",
+                timestamp=datetime.now(),
+                session_id="session-1",
+                entry_type="assistant",
+                agent_id="a123",
+                is_sidechain=True,
+                version="2.0.76",
+            ),
+            Event(
+                id=None,
+                uuid="batch-tool-1",
+                timestamp=datetime.now(),
+                session_id="session-1",
+                entry_type="tool_use",
+                parent_uuid="batch-agent-1",
+                agent_id="a123",
+                is_sidechain=True,
+                tool_name="Read",
+            ),
+        ]
+        count = storage.add_events_batch(events)
+        assert count == 2
+
+        stored = storage.get_events_in_range(session_id="session-1")
+        assert len(stored) == 2
+
+        # Verify assistant event
+        assistant = [e for e in stored if e.entry_type == "assistant"][0]
+        assert assistant.agent_id == "a123"
+
+        # Verify tool_use event links to parent
+        tool = [e for e in stored if e.entry_type == "tool_use"][0]
+        assert tool.parent_uuid == "batch-agent-1"
+
+    def test_index_on_parent_uuid(self, storage):
+        """Verify that idx_events_parent_uuid index exists."""
+        rows = storage.execute_query("PRAGMA index_list(events)")
+        indexes = {row[1] for row in rows}
+        assert "idx_events_parent_uuid" in indexes
+
+    def test_index_on_agent_id(self, storage):
+        """Verify that idx_events_agent_id index exists."""
+        rows = storage.execute_query("PRAGMA index_list(events)")
+        indexes = {row[1] for row in rows}
+        assert "idx_events_agent_id" in indexes

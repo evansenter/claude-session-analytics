@@ -70,6 +70,12 @@ class Event:
     # we implement heuristic detection (e.g., stderr patterns, "Exit code: N" in output).
     exit_code: int | None = None  # For failure detection (Bash commands)
 
+    # RFC #41: Agent tracking and token deduplication
+    parent_uuid: str | None = None  # Links tool_use events to their assistant event
+    agent_id: str | None = None  # Agent ID from agent-*.jsonl files (Task subagents)
+    is_sidechain: bool = False  # True for agent/background work
+    version: str | None = None  # Claude Code version from entry
+
 
 @dataclass
 class Session:
@@ -142,7 +148,7 @@ class GitCommit:
 DEFAULT_DB_PATH = Path.home() / ".claude" / "contrib" / "analytics" / "data.db"
 
 # Schema version for migrations
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 # Migration functions: dict of version -> (migration_name, migration_func)
 # Each migration upgrades FROM version-1 TO version
@@ -291,6 +297,44 @@ def migrate_v4(conn):
     )
 
 
+@migration(5, "add_agent_tracking")
+def migrate_v5(conn):
+    """Add columns for RFC #41: Agent tracking and token deduplication.
+
+    Adds:
+    - parent_uuid: Links tool_use events to their parent assistant event
+    - agent_id: Agent ID from agent-*.jsonl files (Task subagents)
+    - is_sidechain: Boolean for agent/background work
+    - version: Claude Code version from entry
+
+    This migration supports the new event hierarchy where:
+    - assistant events have tokens (not duplicated)
+    - tool_use events link to parent via parent_uuid (no tokens)
+    """
+    # Check existing columns
+    existing_cols = {row[1] for row in conn.execute("PRAGMA table_info(events)")}
+
+    # Add parent_uuid for event hierarchy
+    if "parent_uuid" not in existing_cols:
+        conn.execute("ALTER TABLE events ADD COLUMN parent_uuid TEXT")
+
+    # Add agent_id for Task subagent tracking
+    if "agent_id" not in existing_cols:
+        conn.execute("ALTER TABLE events ADD COLUMN agent_id TEXT")
+
+    # Add is_sidechain for agent/background work
+    if "is_sidechain" not in existing_cols:
+        conn.execute("ALTER TABLE events ADD COLUMN is_sidechain INTEGER DEFAULT 0")
+
+    # Add version for Claude Code version tracking
+    if "version" not in existing_cols:
+        conn.execute("ALTER TABLE events ADD COLUMN version TEXT")
+
+    # Add indexes for efficient querying
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_events_parent_uuid ON events(parent_uuid)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_events_agent_id ON events(agent_id)")
+
+
 class SQLiteStorage:
     """SQLite-backed storage for session analytics."""
 
@@ -433,11 +477,17 @@ class SQLiteStorage:
                     user_message_text TEXT,
                     exit_code INTEGER,
 
+                    -- RFC #41: Agent tracking and token deduplication
+                    parent_uuid TEXT,
+                    agent_id TEXT,
+                    is_sidechain INTEGER DEFAULT 0,
+                    version TEXT,
+
                     UNIQUE(session_id, uuid)
                 )
             """)
 
-            # Indexes for common queries
+            # Indexes for common queries (columns that exist in initial schema)
             conn.execute("CREATE INDEX IF NOT EXISTS idx_events_timestamp ON events(timestamp)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_events_session ON events(session_id)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_events_tool ON events(tool_name)")
@@ -571,10 +621,22 @@ class SQLiteStorage:
                 ON events(id) WHERE user_message_text IS NOT NULL
             """)
 
-            # Run any pending migrations
+            # Run migrations AFTER all tables are created
+            # Only existing databases need migrations - fresh databases have full schema
             current_version = self._get_schema_version(conn)
-            if current_version < SCHEMA_VERSION:
+            if current_version > 0 and current_version < SCHEMA_VERSION:
                 self._run_migrations(conn, current_version)
+            elif current_version == 0:
+                # Fresh database - just set the version, no migrations needed
+                conn.execute(
+                    "INSERT OR REPLACE INTO schema_version (version) VALUES (?)",
+                    (SCHEMA_VERSION,),
+                )
+
+            # RFC #41: Create indexes for agent tracking columns
+            # These run AFTER migrations so columns exist on both fresh and migrated DBs
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_events_parent_uuid ON events(parent_uuid)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_events_agent_id ON events(agent_id)")
 
     # Event operations
 
@@ -588,8 +650,9 @@ class SQLiteStorage:
                     tool_name, tool_input_json, tool_id, is_error,
                     command, command_args, file_path, skill_name,
                     input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens, model,
-                    git_branch, cwd, user_message_text, exit_code
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    git_branch, cwd, user_message_text, exit_code,
+                    parent_uuid, agent_id, is_sidechain, version
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     event.uuid,
@@ -614,6 +677,10 @@ class SQLiteStorage:
                     event.cwd,
                     event.user_message_text,
                     event.exit_code,
+                    event.parent_uuid,
+                    event.agent_id,
+                    1 if event.is_sidechain else 0,
+                    event.version,
                 ),
             )
             event.id = cursor.lastrowid
@@ -629,8 +696,9 @@ class SQLiteStorage:
                     tool_name, tool_input_json, tool_id, is_error,
                     command, command_args, file_path, skill_name,
                     input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens, model,
-                    git_branch, cwd, user_message_text, exit_code
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    git_branch, cwd, user_message_text, exit_code,
+                    parent_uuid, agent_id, is_sidechain, version
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 [
                     (
@@ -656,6 +724,10 @@ class SQLiteStorage:
                         e.cwd,
                         e.user_message_text,
                         e.exit_code,
+                        e.parent_uuid,
+                        e.agent_id,
+                        1 if e.is_sidechain else 0,
+                        e.version,
                     )
                     for e in events
                 ],
@@ -748,6 +820,11 @@ class SQLiteStorage:
             cwd=row["cwd"],
             user_message_text=get_col("user_message_text"),
             exit_code=get_col("exit_code"),
+            # RFC #41: Agent tracking
+            parent_uuid=get_col("parent_uuid"),
+            agent_id=get_col("agent_id"),
+            is_sidechain=bool(get_col("is_sidechain", 0)),
+            version=get_col("version"),
         )
 
     # Session operations

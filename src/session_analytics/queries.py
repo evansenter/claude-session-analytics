@@ -161,12 +161,27 @@ def query_tool_frequency(
 
     tools = [{"tool": row["tool_name"], "count": row["count"]} for row in rows]
 
+    # Get command count (slash commands from ~/.claude/commands)
+    # These are tracked separately as entry_type='command', not tool_name
+    cmd_where, cmd_params = build_where_clause(
+        cutoff=cutoff,
+        project=project,
+        extra_conditions=["entry_type = 'command'"],
+    )
+    cmd_rows = storage.execute_query(
+        f"SELECT COUNT(*) as count FROM events WHERE {cmd_where}",
+        cmd_params,
+    )
+    command_count = cmd_rows[0]["count"] if cmd_rows else 0
+
     # Add breakdowns if expand=True
+    command_breakdown = []
     if expand:
         # Build breakdown queries with same filters
         skill_breakdown = _get_skill_breakdown(storage, cutoff, project)
         task_breakdown = _get_task_breakdown(storage, cutoff, project)
         bash_breakdown = _get_bash_breakdown(storage, cutoff, project)
+        command_breakdown = _get_command_breakdown(storage, cutoff, project)
 
         # Attach breakdowns to respective tools
         for tool in tools:
@@ -176,6 +191,20 @@ def query_tool_frequency(
                 tool["breakdown"] = task_breakdown
             elif tool["tool"] == "Bash" and bash_breakdown:
                 tool["breakdown"] = bash_breakdown
+
+    # Insert Command entry in sorted position (by count)
+    if command_count > 0:
+        command_entry = {"tool": "Command", "count": command_count}
+        if command_breakdown:
+            command_entry["breakdown"] = command_breakdown
+        # Find insertion point to maintain sorted order
+        insert_idx = 0
+        for i, t in enumerate(tools):
+            if t["count"] < command_count:
+                insert_idx = i
+                break
+            insert_idx = i + 1
+        tools.insert(insert_idx, command_entry)
 
     return {
         "days": days,
@@ -209,6 +238,32 @@ def _get_skill_breakdown(
     )
 
     return [{"name": row["skill_name"], "count": row["count"]} for row in rows]
+
+
+def _get_command_breakdown(
+    storage: SQLiteStorage,
+    cutoff: datetime,
+    project: str | None = None,
+) -> list[dict]:
+    """Get Command usage breakdown by command name (slash commands from ~/.claude/commands)."""
+    where_clause, params = build_where_clause(
+        cutoff=cutoff,
+        project=project,
+        extra_conditions=["entry_type = 'command'", "skill_name IS NOT NULL"],
+    )
+
+    rows = storage.execute_query(
+        f"""
+        SELECT skill_name as command_name, COUNT(*) as count
+        FROM events
+        WHERE {where_clause}
+        GROUP BY skill_name
+        ORDER BY count DESC
+        """,
+        params,
+    )
+
+    return [{"name": row["command_name"], "count": row["count"]} for row in rows]
 
 
 def _get_task_breakdown(
@@ -1585,4 +1640,128 @@ def query_mcp_usage(
         "days": days,
         "total_mcp_calls": total,
         "servers": result_servers,
+    }
+
+
+def query_agent_activity(
+    storage: SQLiteStorage,
+    days: int = 7,
+    project: str | None = None,
+) -> dict:
+    """Query activity breakdown by Task subagent.
+
+    RFC #41: Tracks agent activity from Task tool invocations,
+    distinguishing work done by agents vs main session.
+
+    Args:
+        storage: Storage instance
+        days: Number of days to analyze
+        project: Optional project path filter
+
+    Returns:
+        Dict with agent activity breakdown including:
+        - Main session stats (agent_id IS NULL)
+        - Per-agent stats (agent_id IS NOT NULL)
+        - Token usage, event counts, tool usage per agent
+    """
+    cutoff = get_cutoff(days=days)
+    where_clause, params = build_where_clause(
+        cutoff=cutoff,
+        project=project,
+    )
+
+    # Query aggregated stats per agent_id (NULL = main session)
+    rows = storage.execute_query(
+        f"""
+        SELECT
+            agent_id,
+            COUNT(*) as event_count,
+            SUM(CASE WHEN entry_type = 'tool_use' THEN 1 ELSE 0 END) as tool_use_count,
+            SUM(COALESCE(input_tokens, 0)) as input_tokens,
+            SUM(COALESCE(output_tokens, 0)) as output_tokens,
+            SUM(COALESCE(cache_read_tokens, 0)) as cache_read_tokens,
+            SUM(CASE WHEN is_sidechain = 1 THEN 1 ELSE 0 END) as sidechain_events,
+            MIN(timestamp) as first_seen,
+            MAX(timestamp) as last_seen
+        FROM events
+        WHERE {where_clause}
+        GROUP BY agent_id
+        ORDER BY input_tokens DESC
+        """,
+        params,
+    )
+
+    agents = []
+    main_session_stats = None
+
+    for row in rows:
+        agent_data = {
+            "agent_id": row["agent_id"],
+            "event_count": row["event_count"],
+            "tool_use_count": row["tool_use_count"],
+            "input_tokens": row["input_tokens"],
+            "output_tokens": row["output_tokens"],
+            "cache_read_tokens": row["cache_read_tokens"],
+            "sidechain_events": row["sidechain_events"],
+            "first_seen": _format_timestamp(row["first_seen"]),
+            "last_seen": _format_timestamp(row["last_seen"]),
+        }
+
+        if row["agent_id"] is None:
+            main_session_stats = agent_data
+        else:
+            agents.append(agent_data)
+
+    # Get top tools per agent (for agents with activity)
+    agent_ids = [a["agent_id"] for a in agents]
+    if agent_ids:
+        placeholders = ",".join(["?"] * len(agent_ids))
+        tool_rows = storage.execute_query(
+            f"""
+            SELECT
+                agent_id,
+                tool_name,
+                COUNT(*) as count
+            FROM events
+            WHERE {where_clause}
+              AND agent_id IN ({placeholders})
+              AND tool_name IS NOT NULL
+            GROUP BY agent_id, tool_name
+            ORDER BY agent_id, count DESC
+            """,
+            params + agent_ids,
+        )
+
+        # Group top 5 tools per agent
+        agent_tools: dict[str, list] = {}
+        for row in tool_rows:
+            aid = row["agent_id"]
+            if aid not in agent_tools:
+                agent_tools[aid] = []
+            if len(agent_tools[aid]) < 5:
+                agent_tools[aid].append({"tool": row["tool_name"], "count": row["count"]})
+
+        # Attach tools to agents
+        for agent in agents:
+            agent["top_tools"] = agent_tools.get(agent["agent_id"], [])
+
+    # Calculate totals
+    total_agent_tokens = sum(a["input_tokens"] for a in agents)
+    total_main_tokens = main_session_stats["input_tokens"] if main_session_stats else 0
+
+    return {
+        "days": days,
+        "main_session": main_session_stats,
+        "agents": agents,
+        "summary": {
+            "agent_count": len(agents),
+            "total_agent_events": sum(a["event_count"] for a in agents),
+            "total_agent_tokens": total_agent_tokens,
+            "total_main_tokens": total_main_tokens,
+            "agent_token_percentage": (
+                round(total_agent_tokens / (total_agent_tokens + total_main_tokens) * 100, 1)
+                if (total_agent_tokens + total_main_tokens) > 0
+                else 0
+            ),
+        },
     }

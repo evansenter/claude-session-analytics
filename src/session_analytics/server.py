@@ -695,6 +695,28 @@ def get_mcp_usage(days: int = 7, project: str | None = None) -> dict:
     return {"status": "ok", **result}
 
 
+@mcp.tool()
+def get_agent_activity(days: int = 7, project: str | None = None) -> dict:
+    """Get activity breakdown by Task subagent.
+
+    RFC #41: Tracks agent activity from Task tool invocations,
+    distinguishing work done by agents vs main session.
+
+    Args:
+        days: Number of days to analyze (default: 7)
+        project: Optional project path filter
+
+    Returns:
+        Dict with agent activity breakdown including:
+        - Main session stats (agent_id IS NULL)
+        - Per-agent stats with token usage and top tools
+        - Summary with agent vs main session token percentage
+    """
+    queries.ensure_fresh_data(storage, days=days, project=project)
+    result = queries.query_agent_activity(storage, days=days, project=project)
+    return {"status": "ok", **result}
+
+
 def create_app():
     """Create the ASGI app for uvicorn."""
     # stateless_http=True allows resilience to server restarts

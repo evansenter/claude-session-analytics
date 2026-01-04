@@ -24,6 +24,7 @@ from session_analytics.queries import (
     find_related_sessions,
     get_handoff_context,
     get_user_journey,
+    query_agent_activity,
     query_commands,
     query_file_activity,
     query_languages,
@@ -210,6 +211,43 @@ def _format_mcp_usage(data: dict) -> list[str]:
             lines.append(f"  └ {tool['tool']}: {tool['count']}")
         if len(server.get("tools", [])) > 5:
             lines.append(f"  └ ... and {len(server['tools']) - 5} more")
+    return lines
+
+
+@_register_formatter(lambda d: "agents" in d and "main_session" in d)
+def _format_agent_activity(data: dict) -> list[str]:
+    """Format agent activity breakdown.
+
+    RFC #41: Shows activity by Task subagent vs main session.
+    """
+    summary = data.get("summary", {})
+    lines = [
+        "Agent activity breakdown (Task subagent vs main session)",
+        "",
+        f"Agents: {summary.get('agent_count', 0)}",
+        f"Agent tokens: {summary.get('total_agent_tokens', 0):,} ({summary.get('agent_token_percentage', 0)}%)",
+        f"Main tokens: {summary.get('total_main_tokens', 0):,}",
+        "",
+    ]
+
+    # Main session stats
+    main = data.get("main_session")
+    if main:
+        lines.append("Main Session:")
+        lines.append(f"  Events: {main['event_count']:,}")
+        lines.append(f"  Tokens: {main['input_tokens']:,} in / {main['output_tokens']:,} out")
+        lines.append("")
+
+    # Per-agent stats
+    for agent in data.get("agents", []):
+        lines.append(f"Agent {agent['agent_id']}:")
+        lines.append(f"  Events: {agent['event_count']:,} ({agent['tool_use_count']:,} tool uses)")
+        lines.append(f"  Tokens: {agent['input_tokens']:,} in / {agent['output_tokens']:,} out")
+        if agent.get("top_tools"):
+            tools_str = ", ".join(f"{t['tool']}:{t['count']}" for t in agent["top_tools"][:3])
+            lines.append(f"  Top tools: {tools_str}")
+        lines.append("")
+
     return lines
 
 
@@ -627,6 +665,16 @@ def cmd_mcp_usage(args):
     """Show MCP server/tool usage."""
     storage = SQLiteStorage()
     result = query_mcp_usage(storage, days=args.days, project=args.project)
+    print(format_output(result, args.json))
+
+
+def cmd_agents(args):
+    """Show agent activity breakdown.
+
+    RFC #41: Shows activity by Task subagent vs main session.
+    """
+    storage = SQLiteStorage()
+    result = query_agent_activity(storage, days=args.days, project=args.project)
     print(format_output(result, args.json))
 
 
@@ -1080,6 +1128,12 @@ Data location: ~/.claude/contrib/analytics/data.db
     sub.add_argument("--days", type=int, default=7, help="Days to analyze (default: 7)")
     sub.add_argument("--project", help="Project path filter")
     sub.set_defaults(func=cmd_mcp_usage)
+
+    # agents (RFC #41)
+    sub = subparsers.add_parser("agents", help="Show Task subagent activity breakdown")
+    sub.add_argument("--days", type=int, default=7, help="Days to analyze (default: 7)")
+    sub.add_argument("--project", help="Project path filter")
+    sub.set_defaults(func=cmd_agents)
 
     args = parser.parse_args()
     args.func(args)

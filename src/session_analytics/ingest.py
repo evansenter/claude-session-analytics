@@ -60,6 +60,49 @@ def find_log_files(
     return [f for f, _ in files]
 
 
+def extract_command_name(content: str | list) -> str | None:
+    """Extract command name from isMeta user message content.
+
+    User-defined commands (e.g., /status-report) are expanded as user messages
+    with isMeta=true. The content starts with a markdown heading like "# Status Report".
+
+    Returns:
+        Normalized command name (e.g., "status-report") or None if not detected.
+    """
+    import re
+
+    # Get the text content
+    text = None
+    if isinstance(content, str):
+        text = content
+    elif isinstance(content, list):
+        for item in content:
+            if isinstance(item, dict) and item.get("type") == "text":
+                text = item.get("text", "")
+                break
+            elif isinstance(item, str):
+                text = item
+                break
+
+    if not text:
+        return None
+
+    # Look for markdown heading at the start: "# Command Name"
+    match = re.match(r"^#\s+(.+?)(?:\n|$)", text.strip())
+    if not match:
+        return None
+
+    # Normalize: "Status Report" -> "status-report"
+    command_name = match.group(1).strip().lower().replace(" ", "-")
+
+    # Filter out common non-command headings
+    non_commands = {"context", "instructions", "usage", "example", "examples", "notes"}
+    if command_name in non_commands:
+        return None
+
+    return command_name
+
+
 def parse_tool_use(tool_use: dict) -> dict:
     """Extract normalized fields from a tool_use block.
 
@@ -155,59 +198,75 @@ def parse_entry(raw: dict, project_path: str) -> list[Event]:
     cache_creation_tokens = usage.get("cache_creation_input_tokens")
     model = message.get("model")
 
+    # RFC #41: Extract agent tracking fields
+    agent_id = raw.get("agentId")  # Present only in agent-*.jsonl files
+    is_sidechain = raw.get("isSidechain", False)  # True for agent/background work
+    version = raw.get("version")  # Claude Code version
+
     events = []
 
     # Handle assistant entries with tool_use blocks
+    # RFC #41: Always create assistant event with tokens, then tool_use events without tokens
     if entry_type == "assistant":
         content = message.get("content", [])
         tool_uses = [c for c in content if isinstance(c, dict) and c.get("type") == "tool_use"]
 
-        if tool_uses:
-            # Create an event for each tool_use
-            for tool_use in tool_uses:
-                parsed = parse_tool_use(tool_use)
-                events.append(
-                    Event(
-                        id=None,
-                        uuid=f"{uuid}:{parsed['tool_id']}",  # Unique per tool_use
-                        timestamp=timestamp,
-                        session_id=session_id,
-                        project_path=project_path,
-                        entry_type="tool_use",
-                        tool_name=parsed["tool_name"],
-                        tool_input_json=parsed["tool_input_json"],
-                        tool_id=parsed["tool_id"],
-                        is_error=False,
-                        command=parsed["command"],
-                        command_args=parsed["command_args"],
-                        file_path=parsed["file_path"],
-                        skill_name=parsed["skill_name"],
-                        input_tokens=input_tokens,
-                        output_tokens=output_tokens,
-                        cache_read_tokens=cache_read_tokens,
-                        cache_creation_tokens=cache_creation_tokens,
-                        model=model,
-                        git_branch=git_branch,
-                        cwd=cwd,
-                    )
-                )
-        else:
-            # Assistant message without tools
+        # ALWAYS create assistant event with tokens (fixes token duplication)
+        events.append(
+            Event(
+                id=None,
+                uuid=uuid,
+                timestamp=timestamp,
+                session_id=session_id,
+                project_path=project_path,
+                entry_type="assistant",
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                cache_read_tokens=cache_read_tokens,
+                cache_creation_tokens=cache_creation_tokens,
+                model=model,
+                git_branch=git_branch,
+                cwd=cwd,
+                # RFC #41: Agent tracking fields
+                parent_uuid=None,  # Assistant events have no parent
+                agent_id=agent_id,
+                is_sidechain=is_sidechain,
+                version=version,
+            )
+        )
+
+        # Create tool_use events WITHOUT tokens, linked via parent_uuid
+        for tool_use in tool_uses:
+            parsed = parse_tool_use(tool_use)
             events.append(
                 Event(
                     id=None,
-                    uuid=uuid,
+                    uuid=f"{uuid}:{parsed['tool_id']}",  # Unique per tool_use
                     timestamp=timestamp,
                     session_id=session_id,
                     project_path=project_path,
-                    entry_type="assistant",
-                    input_tokens=input_tokens,
-                    output_tokens=output_tokens,
-                    cache_read_tokens=cache_read_tokens,
-                    cache_creation_tokens=cache_creation_tokens,
+                    entry_type="tool_use",
+                    tool_name=parsed["tool_name"],
+                    tool_input_json=parsed["tool_input_json"],
+                    tool_id=parsed["tool_id"],
+                    is_error=False,
+                    command=parsed["command"],
+                    command_args=parsed["command_args"],
+                    file_path=parsed["file_path"],
+                    skill_name=parsed["skill_name"],
+                    # RFC #41: NO tokens on tool_use - they're on the parent assistant
+                    input_tokens=None,
+                    output_tokens=None,
+                    cache_read_tokens=None,
+                    cache_creation_tokens=None,
                     model=model,
                     git_branch=git_branch,
                     cwd=cwd,
+                    # RFC #41: Link to parent assistant event
+                    parent_uuid=uuid,
+                    agent_id=agent_id,
+                    is_sidechain=is_sidechain,
+                    version=version,
                 )
             )
 
@@ -230,6 +289,11 @@ def parse_entry(raw: dict, project_path: str) -> list[Event]:
             if text_parts:
                 user_message_text = " ".join(text_parts)[:USER_MESSAGE_MAX_LENGTH]
 
+        # Extract command name from isMeta user messages (slash command expansions)
+        # e.g., /status-report expands to a user message starting with "# Status Report"
+        is_meta = raw.get("isMeta", False)
+        command_name = extract_command_name(content) if is_meta else None
+
         # Check if content is a list with tool_result blocks
         if isinstance(content, list):
             tool_results = [
@@ -251,6 +315,10 @@ def parse_entry(raw: dict, project_path: str) -> list[Event]:
                             is_error=is_error,
                             git_branch=git_branch,
                             cwd=cwd,
+                            # RFC #41: Agent tracking fields
+                            agent_id=agent_id,
+                            is_sidechain=is_sidechain,
+                            version=version,
                         )
                     )
             else:
@@ -262,10 +330,15 @@ def parse_entry(raw: dict, project_path: str) -> list[Event]:
                         timestamp=timestamp,
                         session_id=session_id,
                         project_path=project_path,
-                        entry_type="user",
+                        entry_type="command" if command_name else "user",
+                        skill_name=command_name,  # Reuse skill_name for command tracking
                         user_message_text=user_message_text,
                         git_branch=git_branch,
                         cwd=cwd,
+                        # RFC #41: Agent tracking fields
+                        agent_id=agent_id,
+                        is_sidechain=is_sidechain,
+                        version=version,
                     )
                 )
         else:
@@ -277,10 +350,15 @@ def parse_entry(raw: dict, project_path: str) -> list[Event]:
                     timestamp=timestamp,
                     session_id=session_id,
                     project_path=project_path,
-                    entry_type="user",
+                    entry_type="command" if command_name else "user",
+                    skill_name=command_name,  # Reuse skill_name for command tracking
                     user_message_text=user_message_text,
                     git_branch=git_branch,
                     cwd=cwd,
+                    # RFC #41: Agent tracking fields
+                    agent_id=agent_id,
+                    is_sidechain=is_sidechain,
+                    version=version,
                 )
             )
 
@@ -294,6 +372,10 @@ def parse_entry(raw: dict, project_path: str) -> list[Event]:
                 session_id=session_id if session_id else "unknown",
                 project_path=project_path,
                 entry_type="summary",
+                # RFC #41: Agent tracking fields
+                agent_id=agent_id,
+                is_sidechain=is_sidechain,
+                version=version,
             )
         )
 

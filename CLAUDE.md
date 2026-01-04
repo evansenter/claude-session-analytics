@@ -154,7 +154,7 @@ Do this:
 {"error_count": 5, "error_rate": 0.25, "has_rework": True, "commit_count": 0}
 ```
 
-## MCP Tools (27 total)
+## MCP Tools (28 total)
 
 ### Status & Ingestion
 | Tool | Purpose |
@@ -186,6 +186,11 @@ Do this:
 | `get_languages` | Language distribution from file extensions |
 | `get_projects` | Activity across all projects |
 | `get_mcp_usage` | MCP server and tool usage breakdown |
+
+### Agent Activity
+| Tool | Purpose |
+|------|---------|
+| `get_agent_activity` | Task subagent activity vs main session (RFC #41) |
 
 ### Session Analysis
 | Tool | Purpose |
@@ -227,7 +232,7 @@ Do this:
 > **Maintainer note**: This discovery flow is also documented in `src/session_analytics/guide.md`
 > (exposed as MCP resource `session-analytics://guide`). Keep both in sync when updating API docs.
 
-## CLI Commands (26 total)
+## CLI Commands (27 total)
 
 All commands support `--json` for machine-readable output:
 
@@ -253,6 +258,9 @@ session-analytics-cli file-activity       # File reads/edits/writes
 session-analytics-cli languages           # Language distribution
 session-analytics-cli projects            # Cross-project activity
 session-analytics-cli mcp-usage           # MCP server/tool usage
+
+# Agent Activity
+session-analytics-cli agents              # Task subagent vs main session (RFC #41)
 
 # Session Analysis
 session-analytics-cli signals             # Raw session metrics

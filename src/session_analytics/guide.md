@@ -80,6 +80,12 @@ identify permission gaps.
 |------|---------|
 | `get_session_signals(days?, min_count?)` | Raw session metrics for LLM interpretation |
 
+### Agent Activity
+
+| Tool | Purpose |
+|------|---------|
+| `get_agent_activity(days?, project?)` | Task subagent activity vs main session (RFC #41) |
+
 ## Quick Start
 
 ### 1. Check status
