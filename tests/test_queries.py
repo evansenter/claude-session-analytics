@@ -5,6 +5,7 @@ from datetime import datetime, timedelta
 from session_analytics.queries import (
     ensure_fresh_data,
     get_cutoff,
+    query_agent_activity,
     query_commands,
     query_file_activity,
     query_languages,
@@ -1522,3 +1523,278 @@ class TestNormalizeDatetime:
         normalized_naive = normalize_datetime(naive_dt)
 
         assert normalized_aware == normalized_naive
+
+
+class TestQueryAgentActivity:
+    """Tests for query_agent_activity().
+
+    RFC #41: Tracks agent activity from Task tool invocations,
+    distinguishing work done by agents vs main session.
+    """
+
+    def test_main_session_only(self, storage):
+        """Test with only main session events (no agent_id)."""
+        now = datetime.now()
+        storage.add_event(
+            Event(
+                id=None,
+                uuid="main-1",
+                timestamp=now,
+                session_id="s1",
+                project_path="test-project",
+                entry_type="assistant",
+                input_tokens=100,
+                output_tokens=50,
+                agent_id=None,  # Main session
+            )
+        )
+        storage.add_event(
+            Event(
+                id=None,
+                uuid="main-2",
+                timestamp=now,
+                session_id="s1",
+                project_path="test-project",
+                entry_type="tool_use",
+                tool_name="Read",
+                input_tokens=None,  # tool_use has no tokens
+                agent_id=None,
+            )
+        )
+
+        result = query_agent_activity(storage, days=1)
+
+        assert result["days"] == 1
+        assert result["main_session"] is not None
+        assert result["main_session"]["event_count"] == 2
+        assert result["main_session"]["input_tokens"] == 100
+        assert result["agents"] == []
+        assert result["summary"]["agent_count"] == 0
+        assert result["summary"]["agent_token_percentage"] == 0
+
+    def test_agent_and_main_session(self, storage):
+        """Test with both main session and agent events."""
+        now = datetime.now()
+
+        # Main session events
+        storage.add_event(
+            Event(
+                id=None,
+                uuid="main-1",
+                timestamp=now,
+                session_id="s1",
+                project_path="test-project",
+                entry_type="assistant",
+                input_tokens=200,
+                output_tokens=100,
+                agent_id=None,
+            )
+        )
+
+        # Agent events
+        storage.add_event(
+            Event(
+                id=None,
+                uuid="agent-1",
+                timestamp=now,
+                session_id="s1",
+                project_path="test-project",
+                entry_type="assistant",
+                input_tokens=300,
+                output_tokens=150,
+                agent_id="a123456",
+                is_sidechain=True,
+            )
+        )
+        storage.add_event(
+            Event(
+                id=None,
+                uuid="agent-2",
+                timestamp=now,
+                session_id="s1",
+                project_path="test-project",
+                entry_type="tool_use",
+                tool_name="Bash",
+                agent_id="a123456",
+                is_sidechain=True,
+            )
+        )
+
+        result = query_agent_activity(storage, days=1)
+
+        # Check main session
+        assert result["main_session"]["event_count"] == 1
+        assert result["main_session"]["input_tokens"] == 200
+
+        # Check agent
+        assert len(result["agents"]) == 1
+        agent = result["agents"][0]
+        assert agent["agent_id"] == "a123456"
+        assert agent["event_count"] == 2
+        assert agent["tool_use_count"] == 1
+        assert agent["input_tokens"] == 300
+        assert agent["sidechain_events"] == 2  # Both agent events have is_sidechain=True
+
+        # Check summary
+        assert result["summary"]["agent_count"] == 1
+        assert result["summary"]["total_agent_tokens"] == 300
+        assert result["summary"]["total_main_tokens"] == 200
+        # 300 / (300 + 200) = 60%
+        assert result["summary"]["agent_token_percentage"] == 60.0
+
+    def test_multiple_agents(self, storage):
+        """Test with multiple agents."""
+        now = datetime.now()
+
+        # Agent A
+        storage.add_event(
+            Event(
+                id=None,
+                uuid="agent-a-1",
+                timestamp=now,
+                session_id="s1",
+                project_path="test-project",
+                entry_type="assistant",
+                input_tokens=400,
+                agent_id="agent-a",
+            )
+        )
+
+        # Agent B
+        storage.add_event(
+            Event(
+                id=None,
+                uuid="agent-b-1",
+                timestamp=now,
+                session_id="s1",
+                project_path="test-project",
+                entry_type="assistant",
+                input_tokens=100,
+                agent_id="agent-b",
+            )
+        )
+
+        result = query_agent_activity(storage, days=1)
+
+        # Agents should be ordered by input_tokens DESC
+        assert len(result["agents"]) == 2
+        assert result["agents"][0]["agent_id"] == "agent-a"
+        assert result["agents"][0]["input_tokens"] == 400
+        assert result["agents"][1]["agent_id"] == "agent-b"
+        assert result["agents"][1]["input_tokens"] == 100
+
+        assert result["summary"]["agent_count"] == 2
+        assert result["summary"]["total_agent_tokens"] == 500
+
+    def test_top_tools_per_agent(self, storage):
+        """Test that top tools are calculated per agent."""
+        now = datetime.now()
+
+        # Agent with multiple tool uses
+        storage.add_event(
+            Event(
+                id=None,
+                uuid="agent-assist",
+                timestamp=now,
+                session_id="s1",
+                project_path="test-project",
+                entry_type="assistant",
+                input_tokens=100,
+                agent_id="agent-1",
+            )
+        )
+        for i, tool in enumerate(["Read", "Read", "Read", "Edit", "Bash"]):
+            storage.add_event(
+                Event(
+                    id=None,
+                    uuid=f"agent-tool-{i}",
+                    timestamp=now,
+                    session_id="s1",
+                    project_path="test-project",
+                    entry_type="tool_use",
+                    tool_name=tool,
+                    agent_id="agent-1",
+                )
+            )
+
+        result = query_agent_activity(storage, days=1)
+
+        assert len(result["agents"]) == 1
+        agent = result["agents"][0]
+        assert "top_tools" in agent
+        assert len(agent["top_tools"]) == 3  # Read, Edit, Bash
+
+        # Read should be first (count=3)
+        assert agent["top_tools"][0]["tool"] == "Read"
+        assert agent["top_tools"][0]["count"] == 3
+
+    def test_project_filter(self, storage):
+        """Test project filter works."""
+        now = datetime.now()
+
+        # Project A events
+        storage.add_event(
+            Event(
+                id=None,
+                uuid="project-a",
+                timestamp=now,
+                session_id="s1",
+                project_path="project-a",
+                entry_type="assistant",
+                input_tokens=100,
+                agent_id="agent-1",
+            )
+        )
+
+        # Project B events
+        storage.add_event(
+            Event(
+                id=None,
+                uuid="project-b",
+                timestamp=now,
+                session_id="s2",
+                project_path="project-b",
+                entry_type="assistant",
+                input_tokens=200,
+                agent_id="agent-2",
+            )
+        )
+
+        result = query_agent_activity(storage, days=1, project="project-a")
+
+        # Should only see agent-1 from project-a
+        assert len(result["agents"]) == 1
+        assert result["agents"][0]["agent_id"] == "agent-1"
+
+    def test_empty_results(self, storage):
+        """Test with no matching events."""
+        result = query_agent_activity(storage, days=1)
+
+        assert result["main_session"] is None
+        assert result["agents"] == []
+        assert result["summary"]["agent_count"] == 0
+        assert result["summary"]["agent_token_percentage"] == 0
+
+    def test_zero_division_protection(self, storage):
+        """Test that percentage calculation handles zero tokens."""
+        now = datetime.now()
+
+        # Event with zero tokens
+        storage.add_event(
+            Event(
+                id=None,
+                uuid="zero-tokens",
+                timestamp=now,
+                session_id="s1",
+                project_path="test-project",
+                entry_type="tool_use",
+                tool_name="Read",
+                input_tokens=None,  # No tokens
+                agent_id=None,
+            )
+        )
+
+        result = query_agent_activity(storage, days=1)
+
+        # Should not raise ZeroDivisionError
+        assert result["summary"]["agent_token_percentage"] == 0

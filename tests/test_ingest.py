@@ -146,9 +146,10 @@ class TestExtractCommandName:
         assert extract_command_name(content) == "status-report"
 
     def test_extract_multi_word_command(self):
-        """Test extracting multi-word commands."""
+        """Test extracting multi-word commands with special chars normalized."""
         content = "# I'm Lost\n\nShow current workflow position..."
-        assert extract_command_name(content) == "i'm-lost"
+        # Apostrophes and other non-alphanumeric chars are normalized to hyphens
+        assert extract_command_name(content) == "i-m-lost"
 
     def test_extract_from_list_content(self):
         """Test extracting from list content with text blocks."""

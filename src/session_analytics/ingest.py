@@ -2,6 +2,7 @@
 
 import json
 import logging
+import re
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -69,8 +70,6 @@ def extract_command_name(content: str | list) -> str | None:
     Returns:
         Normalized command name (e.g., "status-report") or None if not detected.
     """
-    import re
-
     # Get the text content
     text = None
     if isinstance(content, str):
@@ -92,8 +91,10 @@ def extract_command_name(content: str | list) -> str | None:
     if not match:
         return None
 
-    # Normalize: "Status Report" -> "status-report"
-    command_name = match.group(1).strip().lower().replace(" ", "-")
+    # Normalize: "Status Report" -> "status-report", "I'm Lost" -> "im-lost"
+    # Use regex to replace non-alphanumeric chars with hyphens, then clean up
+    command_name = re.sub(r"[^a-z0-9]+", "-", match.group(1).strip().lower())
+    command_name = command_name.strip("-")  # Remove leading/trailing hyphens
 
     # Filter out common non-command headings
     non_commands = {"context", "instructions", "usage", "example", "examples", "notes"}
