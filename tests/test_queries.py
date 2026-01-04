@@ -1106,6 +1106,67 @@ class TestClassifySessions:
         # Session with only 3 events should be excluded
         assert result["session_count"] == 0
 
+    def test_classification_factors_included(self, storage):
+        """Test that classification_factors explains WHY sessions were categorized.
+
+        RFC #49: Without classification_factors, an LLM seeing 'category: debugging'
+        cannot explain to the user why it was classified that way.
+        """
+        from session_analytics.queries import classify_sessions
+
+        now = datetime.now()
+        events = []
+        # Create session with >15% error rate to trigger debugging classification
+        for i in range(6):
+            events.append(
+                Event(
+                    id=None,
+                    uuid=f"factors-tool-{i}",
+                    timestamp=now - timedelta(hours=1, minutes=i),
+                    session_id="factors-session",
+                    project_path="/factors/project",
+                    entry_type="tool_use",
+                    tool_name="Bash",
+                    tool_id=f"tool-{i}",
+                )
+            )
+        # Add 2 error results (33% error rate)
+        for i in range(2):
+            events.append(
+                Event(
+                    id=None,
+                    uuid=f"factors-error-{i}",
+                    timestamp=now - timedelta(hours=1, minutes=i + 10),
+                    session_id="factors-session",
+                    project_path="/factors/project",
+                    entry_type="tool_result",
+                    tool_id=f"tool-{i}",
+                    is_error=True,
+                )
+            )
+        storage.add_events_batch(events)
+
+        result = classify_sessions(storage, days=7)
+
+        session = next(
+            (s for s in result["sessions"] if s["session_id"] == "factors-session"),
+            None,
+        )
+        assert session is not None
+        assert session["category"] == "debugging"
+
+        # Verify classification_factors exists and explains WHY
+        assert "classification_factors" in session
+        factors = session["classification_factors"]
+
+        # Should include the trigger that caused this classification
+        assert "trigger" in factors
+        assert "error_rate" in factors["trigger"] or "error_count" in factors["trigger"]
+
+        # Should include the relevant metrics
+        assert "error_rate" in factors
+        assert factors["error_rate"] > 15  # Should be ~33%
+
 
 class TestGetUserJourneyIncludeProjects:
     """Test for get_user_journey with include_projects=False."""

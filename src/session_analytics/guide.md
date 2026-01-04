@@ -38,20 +38,29 @@ identify permission gaps.
 |------|---------|
 | `get_tool_sequences(days?, min_count?, length?)` | Common tool chains (e.g., Read → Edit → Bash) |
 | `sample_sequences(pattern, limit?, context_events?)` | Random samples of a pattern with surrounding context |
-| `get_permission_gaps(days?, min_count?)` | Commands that should be in settings.json |
+| `get_permission_gaps(days?, min_count?)` | Commands not covered by settings.json (supports glob patterns) |
 | `get_insights(days?, refresh?)` | Pre-computed patterns for /improve-workflow |
 
 ### Failure Analysis
 
 | Tool | Purpose |
 |------|---------|
-| `analyze_failures(days?, project?)` | Failure patterns, rework, and correlations |
+| `analyze_failures(days?, project?)` | Failure patterns with drill-down to specific commands |
+
+Returns:
+- `errors_by_tool`: Count of errors per tool
+- `error_examples`: Top failing commands (Bash) or files (Edit/Read/Write) for drill-down
+- `rework_patterns`: Files edited 3+ times within 10 minutes
 
 ### Session Classification
 
 | Tool | Purpose |
 |------|---------|
-| `classify_sessions(days?, project?)` | Categorize sessions (debugging, development, research, maintenance) |
+| `classify_sessions(days?, project?)` | Categorize sessions with explanation of why |
+
+Each session includes `classification_factors` explaining WHY it was categorized:
+- `trigger`: The threshold that was exceeded (e.g., "error_rate > 15%")
+- Relevant metrics (error_rate, edit_rate, etc.)
 
 ### Trend Analysis
 
@@ -168,15 +177,15 @@ analyze_trends()      → "Usage is increasing/decreasing"
 
 ### Session Categories
 
-`classify_sessions()` returns one of these categories:
+`classify_sessions()` returns one of these categories, with `classification_factors` explaining why:
 
-| Category | Criteria |
-|----------|----------|
-| **debugging** | High error rate (>15%) or 5+ errors |
-| **development** | Heavy editing (>30% edits or 3+ writes) |
-| **maintenance** | Git/build focus without much editing |
-| **research** | Mostly reading/searching codebase |
-| **mixed** | No dominant pattern |
+| Category | Criteria | Trigger Example |
+|----------|----------|-----------------|
+| **debugging** | High error rate (>15%) or 5+ errors | `"error_rate > 15%"` |
+| **development** | Heavy editing (>30% edits or 3+ writes) | `"edit_rate > 30%"` |
+| **maintenance** | Git/build focus without much editing | `"git_build_rate > 30%"` |
+| **research** | Mostly reading/searching codebase | `"read_search_rate > 50%"` |
+| **mixed** | No dominant pattern | `"no_dominant_pattern"` |
 
 ### Permission Gaps
 
@@ -188,6 +197,9 @@ get_permission_gaps(min_count=5)
 ```
 
 Add suggestions to `permissions.allow` in your settings.
+
+**Note:** Supports glob pattern matching. Patterns like `Bash(make*)` will correctly
+match commands `make`, `make-test`, etc. using fnmatch.
 
 ### Git Integration
 

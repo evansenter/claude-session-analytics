@@ -1052,13 +1052,18 @@ def classify_sessions(
     - research: Read/search heavy, exploring codebase
     - maintenance: CI/git heavy, infrastructure work
 
+    Each session includes `classification_factors` explaining WHY it was
+    categorized, including the trigger threshold and relevant metrics.
+
     Args:
         storage: Storage instance
         days: Number of days to analyze (default: 7)
         project: Optional project filter
 
     Returns:
-        Dict with session classifications and category distribution
+        Dict with:
+        - sessions: List with category, confidence, classification_factors, and stats
+        - category_distribution: Count of sessions per category
     """
     cutoff = get_cutoff(days=days)
 
@@ -1123,21 +1128,52 @@ def classify_sessions(
         # - Maintenance: Git/build focus without editing (>30% combined)
         # - Research: Mostly reading/searching codebase (>50% combined)
         # - Mixed: No dominant pattern, balanced activity
-        if error_pct > 0.15 or (row["error_count"] or 0) > 5:
+        error_count = row["error_count"] or 0
+        write_count = row["write_count"] or 0
+
+        if error_pct > 0.15 or error_count > 5:
             category = "debugging"
             confidence = min(1.0, error_pct * 3)
-        elif edit_pct > 0.3 or (row["write_count"] or 0) > 3:
+            classification_factors = {
+                "trigger": "error_rate > 15%" if error_pct > 0.15 else "error_count > 5",
+                "error_rate": round(error_pct * 100, 1),
+                "error_count": error_count,
+            }
+        elif edit_pct > 0.3 or write_count > 3:
             category = "development"
-            confidence = min(1.0, (edit_pct + (row["write_count"] or 0) / total) * 2)
+            confidence = min(1.0, (edit_pct + write_count / total) * 2)
+            classification_factors = {
+                "trigger": "edit_rate > 30%" if edit_pct > 0.3 else "write_count > 3",
+                "edit_rate": round(edit_pct * 100, 1),
+                "write_count": write_count,
+            }
         elif git_pct + build_pct > 0.3:
             category = "maintenance"
             confidence = min(1.0, (git_pct + build_pct) * 2)
+            classification_factors = {
+                "trigger": "git_build_rate > 30%",
+                "git_rate": round(git_pct * 100, 1),
+                "build_rate": round(build_pct * 100, 1),
+            }
         elif read_pct + search_pct > 0.5:
             category = "research"
             confidence = min(1.0, (read_pct + search_pct) * 1.5)
+            classification_factors = {
+                "trigger": "read_search_rate > 50%",
+                "read_rate": round(read_pct * 100, 1),
+                "search_rate": round(search_pct * 100, 1),
+            }
         else:
             category = "mixed"
             confidence = 0.5
+            classification_factors = {
+                "trigger": "no_dominant_pattern",
+                "top_activities": {
+                    "edit_rate": round(edit_pct * 100, 1),
+                    "read_rate": round(read_pct * 100, 1),
+                    "search_rate": round(search_pct * 100, 1),
+                },
+            }
 
         category_counts[category] += 1
 
@@ -1147,13 +1183,14 @@ def classify_sessions(
                 "project": row["project_path"],
                 "category": category,
                 "confidence": round(confidence, 2),
+                "classification_factors": classification_factors,
                 "stats": {
                     "total_events": row["total_events"],
                     "edit_count": row["edit_count"] or 0,
                     "read_count": row["read_count"] or 0,
                     "search_count": row["search_count"] or 0,
                     "git_count": row["git_count"] or 0,
-                    "error_count": row["error_count"] or 0,
+                    "error_count": error_count,
                 },
                 "first_seen": _format_timestamp(row["first_seen"]),
                 "last_seen": _format_timestamp(row["last_seen"]),

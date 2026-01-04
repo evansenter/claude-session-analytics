@@ -92,17 +92,18 @@ class TestPermissionGaps:
         """Test loading allowed commands from non-existent file."""
         with tempfile.TemporaryDirectory() as tmpdir:
             missing_path = Path(tmpdir) / "nonexistent.json"
-            allowed = load_allowed_commands(missing_path)
-            assert allowed == set()
+            base_commands, glob_patterns = load_allowed_commands(missing_path)
+            assert base_commands == set()
+            assert glob_patterns == []
 
     def test_load_allowed_commands(self):
         """Test loading allowed commands from settings.json."""
         with tempfile.TemporaryDirectory() as tmpdir:
             settings_path = Path(tmpdir) / "settings.json"
             settings_path.write_text('{"permissions": {"allow": ["Bash(git:*)", "Bash(make:*)"]}}')
-            allowed = load_allowed_commands(settings_path)
-            assert "git" in allowed
-            assert "make" in allowed
+            base_commands, glob_patterns = load_allowed_commands(settings_path)
+            assert "git" in base_commands
+            assert "make" in base_commands
 
     def test_compute_permission_gaps(self, pattern_storage):
         """Test computing permission gaps."""
@@ -150,16 +151,16 @@ class TestPermissionGaps:
                 '"Bash(cargo build:*)"'
                 "]}}"
             )
-            allowed = load_allowed_commands(settings_path)
+            base_commands, glob_patterns = load_allowed_commands(settings_path)
 
             # Should extract base commands, not full subcommands
-            assert "gh" in allowed
-            assert "git" in allowed
-            assert "cargo" in allowed
+            assert "gh" in base_commands
+            assert "git" in base_commands
+            assert "cargo" in base_commands
 
             # Should NOT contain full subcommand strings
-            assert "gh pr view" not in allowed
-            assert "git status" not in allowed
+            assert "gh pr view" not in base_commands
+            assert "git status" not in base_commands
 
     def test_permission_gaps_filters_subcommand_patterns(self, pattern_storage):
         """Test that gaps are filtered when subcommand patterns exist.
@@ -183,6 +184,52 @@ class TestPermissionGaps:
             assert "git" not in pattern_keys
             # make has no patterns, should still be a gap
             assert "make" in pattern_keys
+
+    def test_load_allowed_commands_handles_glob_patterns(self):
+        """Test that glob patterns (without :*) are handled correctly.
+
+        Patterns like Bash(make*) should be recognized and used for
+        fnmatch-based matching.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            settings_path = Path(tmpdir) / "settings.json"
+            settings_path.write_text(
+                '{"permissions": {"allow": ['
+                '"Bash(make*)", '
+                '"Bash(./scripts/*.sh:*)", '
+                '"Bash(cargo)"'
+                "]}}"
+            )
+            base_commands, glob_patterns = load_allowed_commands(settings_path)
+
+            # Should extract base commands
+            assert "make" in base_commands
+            assert "cargo" in base_commands
+
+            # Glob patterns should be stored for fnmatch
+            assert "make*" in glob_patterns
+            assert "cargo" in glob_patterns
+
+    def test_permission_gaps_uses_fnmatch(self, pattern_storage):
+        """Test that permission gaps uses fnmatch for glob pattern matching.
+
+        If settings has Bash(make*), then 'make' should NOT be reported
+        as a permission gap because it matches the glob pattern.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            settings_path = Path(tmpdir) / "settings.json"
+            # Use glob pattern without :*
+            settings_path.write_text('{"permissions": {"allow": ["Bash(make*)"]}}')
+
+            patterns = compute_permission_gaps(
+                pattern_storage, days=7, threshold=1, settings_path=settings_path
+            )
+
+            pattern_keys = {p.pattern_key for p in patterns}
+            # make should be filtered out by fnmatch against "make*"
+            assert "make" not in pattern_keys
+            # git has no matching pattern, should still be a gap
+            assert "git" in pattern_keys
 
 
 class TestComputeAllPatterns:
@@ -502,6 +549,74 @@ class TestAnalyzeFailures:
 
         # Different files shouldn't count as rework
         assert result["rework_patterns"]["instances_detected"] == 0
+
+    def test_analyze_failures_error_examples(self, storage):
+        """Test that error_examples provides drill-down to specific failing commands/files.
+
+        RFC #49: When errors_by_tool shows 'Bash: 5 errors', error_examples should
+        reveal WHICH commands failed, enabling actionable diagnosis.
+        """
+        from session_analytics.patterns import analyze_failures
+
+        now = datetime.now()
+        events = [
+            # Bash error with command
+            Event(
+                id=None,
+                uuid="bash-use-1",
+                timestamp=now - timedelta(hours=1),
+                session_id="s1",
+                entry_type="tool_use",
+                tool_name="Bash",
+                tool_id="bash-1",
+                command="make test",
+            ),
+            Event(
+                id=None,
+                uuid="bash-result-1",
+                timestamp=now - timedelta(hours=1, minutes=-1),
+                session_id="s1",
+                entry_type="tool_result",
+                tool_id="bash-1",
+                is_error=True,
+            ),
+            # Read error with file_path
+            Event(
+                id=None,
+                uuid="read-use-1",
+                timestamp=now - timedelta(hours=2),
+                session_id="s1",
+                entry_type="tool_use",
+                tool_name="Read",
+                tool_id="read-1",
+                file_path="/nonexistent/file.py",
+            ),
+            Event(
+                id=None,
+                uuid="read-result-1",
+                timestamp=now - timedelta(hours=2, minutes=-1),
+                session_id="s1",
+                entry_type="tool_result",
+                tool_id="read-1",
+                is_error=True,
+            ),
+        ]
+        storage.add_events_batch(events)
+
+        result = analyze_failures(storage, days=7)
+
+        # Verify error_examples exists
+        assert "error_examples" in result
+
+        # Bash errors should include the failing command
+        bash_examples = result["error_examples"].get("Bash", [])
+        assert len(bash_examples) >= 1
+        assert any(ex.get("command") == "make test" for ex in bash_examples)
+
+        # Read errors should include the failing file
+        read_examples = result["error_examples"].get("Read", [])
+        assert len(read_examples) >= 1
+        assert any(ex.get("file") == "/nonexistent/file.py" for ex in read_examples)
 
 
 class TestAnalyzeTrends:

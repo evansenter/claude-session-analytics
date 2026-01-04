@@ -1,5 +1,6 @@
 """Pattern detection and insight generation for session analytics."""
 
+import fnmatch
 import json
 import logging
 import random
@@ -241,12 +242,12 @@ def sample_sequences(
     else:
         target_tools = [t.strip() for t in pattern.split(",")]
 
-    # Validate individual tool names (alphanumeric + underscore only)
+    # Validate individual tool names (alphanumeric and underscores only)
     for tool in target_tools:
         if not tool or not all(c.isalnum() or c == "_" for c in tool):
             return {
                 "pattern": pattern,
-                "error": f"Invalid tool name: '{tool}' (must be alphanumeric)",
+                "error": f"Invalid tool name: '{tool}' (must be alphanumeric or underscores)",
                 "total_occurrences": 0,
                 "samples": [],
             }
@@ -389,6 +390,7 @@ def analyze_failures(
 
     Identifies:
     - Tool errors (is_error=True in tool_result)
+    - Error examples showing top failing commands/files per tool
     - Rework patterns (same file edited multiple times quickly)
     - Error clustering by tool/command
 
@@ -398,7 +400,10 @@ def analyze_failures(
         rework_window_minutes: Time window for detecting rework (default: 10)
 
     Returns:
-        Dict with failure analysis including error counts, rework patterns, recovery times
+        Dict with:
+        - errors_by_tool: Count of errors per tool
+        - error_examples: Top failing commands (Bash) or files (Edit/Read/Write) per tool
+        - rework_patterns: Instances of same file edited 3+ times quickly
     """
     cutoff = get_cutoff(days=days)
 
@@ -451,6 +456,54 @@ def analyze_failures(
         for row in tool_error_counts
         if row["tool_name"]
     ]
+
+    # Get error examples: top failing commands/files for drill-down
+    # For Bash, group by command; for file tools, group by file_path
+    error_examples_rows = storage.execute_query(
+        """
+        SELECT
+            e2.tool_name,
+            e2.command,
+            e2.file_path,
+            COUNT(*) as error_count
+        FROM events e1
+        JOIN events e2 ON e1.tool_id = e2.tool_id AND e2.entry_type = 'tool_use'
+        WHERE e1.timestamp >= ?
+          AND e1.is_error = 1
+          AND e1.entry_type = 'tool_result'
+        GROUP BY e2.tool_name, e2.command, e2.file_path
+        ORDER BY e2.tool_name, error_count DESC
+        """,
+        (cutoff,),
+    )
+
+    # Organize error examples by tool with top 5 examples each
+    error_examples: dict[str, list[dict]] = {}
+    tool_example_counts: dict[str, int] = {}
+
+    for row in error_examples_rows:
+        tool = row["tool_name"]
+        if not tool:
+            continue
+
+        # Limit to 5 examples per tool
+        if tool_example_counts.get(tool, 0) >= 5:
+            continue
+
+        if tool not in error_examples:
+            error_examples[tool] = []
+            tool_example_counts[tool] = 0
+
+        # Build example based on tool type
+        if tool == "Bash" and row["command"]:
+            error_examples[tool].append({"command": row["command"], "count": row["error_count"]})
+        elif row["file_path"]:
+            error_examples[tool].append({"file": row["file_path"], "count": row["error_count"]})
+        else:
+            # Generic fallback
+            error_examples[tool].append({"count": row["error_count"]})
+
+        tool_example_counts[tool] += 1
 
     # Detect rework patterns: same file edited multiple times in quick succession
     rework_window = timedelta(minutes=rework_window_minutes)
@@ -542,6 +595,7 @@ def analyze_failures(
         "sessions_with_errors": sessions_with_errors,
         "avg_errors_per_session": round(avg_errors_per_session, 2),
         "errors_by_tool": errors_by_tool[:10],
+        "error_examples": error_examples,
         "rework_patterns": {
             "instances_detected": len(rework_instances),
             "rework_window_minutes": rework_window_minutes,
@@ -550,50 +604,101 @@ def analyze_failures(
     }
 
 
-def load_allowed_commands(settings_path: Path = DEFAULT_SETTINGS_PATH) -> set[str]:
-    """Load allowed base commands from Claude Code settings.json.
+def load_allowed_commands(
+    settings_path: Path = DEFAULT_SETTINGS_PATH,
+) -> tuple[set[str], list[str]]:
+    """Load allowed base commands and glob patterns from Claude Code settings.json.
 
-    Parses Bash permission patterns and extracts base commands:
-    - Bash(gh:*) → gh
-    - Bash(gh pr view:*) → gh
-    - Bash(git status:*) → git
-
-    This means a command like `gh` won't be reported as a permission gap
-    if ANY pattern for `gh` exists (e.g., `Bash(gh pr view:*)`).
+    Parses Bash permission patterns and extracts:
+    1. Base commands for simple matching:
+       - Bash(gh:*) → gh
+       - Bash(gh pr view:*) → gh
+       - Bash(git status:*) → git
+    2. Glob patterns for fnmatch matching:
+       - Bash(make*) → make*
+       - Bash(./scripts/*.sh:*) → ./scripts/*.sh
 
     Args:
         settings_path: Path to settings.json
 
     Returns:
-        Set of base commands that have any configured pattern
+        Tuple of (base_commands set, glob_patterns list for fnmatch)
     """
     if not settings_path.exists():
-        return set()
+        return set(), []
 
     try:
         with open(settings_path) as f:
             settings = json.load(f)
 
-        base_commands = set()
+        base_commands: set[str] = set()
+        glob_patterns: list[str] = []
         permissions = settings.get("permissions", {})
 
         for pattern in permissions.get("allow", []):
-            if pattern.startswith("Bash(") and ":*)" in pattern:
-                # Extract full command from "Bash(command args:*)"
-                # Find the position of ":*)" to handle patterns correctly
-                start = 5  # len("Bash(")
-                end = pattern.find(":*)")
-                if end > start:
-                    full_cmd = pattern[start:end]
-                    # Extract base command (first word)
-                    base_cmd = full_cmd.split()[0] if full_cmd else None
+            if not pattern.startswith("Bash(") or not pattern.endswith(")"):
+                continue
+
+            # Extract content from Bash(...)
+            content = pattern[5:-1]  # Remove "Bash(" and ")"
+            if not content:
+                continue
+
+            # Handle different formats
+            if ":*" in content:
+                # Standard format: Bash(cmd:*) or Bash(cmd args:*)
+                full_cmd = content.split(":*")[0]
+                # Extract base command (first word)
+                base_cmd = full_cmd.split()[0] if full_cmd else None
+                if base_cmd:
+                    base_commands.add(base_cmd)
+                    # Also store as glob pattern for fnmatch
+                    glob_patterns.append(base_cmd)
+            elif "*" in content or "?" in content or "[" in content:
+                # Glob pattern: Bash(make*), Bash(./scripts/*.sh)
+                # Extract base command (remove glob chars for base matching)
+                base = content.rstrip("*").rstrip()
+                if base:
+                    # For patterns like "make*", base is "make"
+                    base_cmd = base.split()[0] if base else None
                     if base_cmd:
                         base_commands.add(base_cmd)
+                # Store full pattern for fnmatch
+                glob_patterns.append(content)
+            else:
+                # Exact match: Bash(cmd)
+                base_cmd = content.split()[0] if content else None
+                if base_cmd:
+                    base_commands.add(base_cmd)
+                    glob_patterns.append(base_cmd)
 
-        return base_commands
+        return base_commands, glob_patterns
     except (json.JSONDecodeError, OSError) as e:
         logger.warning(f"Could not load settings.json: {e}")
-        return set()
+        return set(), []
+
+
+def _command_matches_patterns(cmd: str, base_commands: set[str], glob_patterns: list[str]) -> bool:
+    """Check if a command is covered by allowed patterns.
+
+    Args:
+        cmd: The base command to check (e.g., "git", "make")
+        base_commands: Set of allowed base commands
+        glob_patterns: List of glob patterns for fnmatch
+
+    Returns:
+        True if command is allowed by any pattern
+    """
+    # First check simple base command membership
+    if cmd in base_commands:
+        return True
+
+    # Then check glob patterns using fnmatch
+    for pattern in glob_patterns:
+        if fnmatch.fnmatch(cmd, pattern):
+            return True
+
+    return False
 
 
 def compute_permission_gaps(
@@ -603,6 +708,9 @@ def compute_permission_gaps(
     settings_path: Path = DEFAULT_SETTINGS_PATH,
 ) -> list[Pattern]:
     """Find commands that are frequently used but not in settings.json.
+
+    Uses fnmatch for glob pattern matching, so patterns like Bash(make*)
+    will correctly match commands like 'make', 'make-test', etc.
 
     Args:
         storage: Storage instance
@@ -616,7 +724,7 @@ def compute_permission_gaps(
     cutoff = get_cutoff(days=days)
     now = datetime.now()
 
-    allowed_commands = load_allowed_commands(settings_path)
+    base_commands, glob_patterns = load_allowed_commands(settings_path)
 
     rows = storage.execute_query(
         """
@@ -633,7 +741,7 @@ def compute_permission_gaps(
     patterns = []
     for row in rows:
         cmd = row["command"]
-        if cmd not in allowed_commands:
+        if not _command_matches_patterns(cmd, base_commands, glob_patterns):
             patterns.append(
                 Pattern(
                     id=None,
