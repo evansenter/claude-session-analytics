@@ -144,11 +144,29 @@ class GitCommit:
             raise ValueError(f"SHA must be hexadecimal, got '{self.sha}'")
 
 
+@dataclass
+class BusEvent:
+    """An event from the event-bus for cross-session insights.
+
+    Stores events like gotcha_discovered, pattern_found, help_needed, etc.
+    for correlation with session activity.
+    """
+
+    id: int | None
+    event_id: int  # Original ID from event-bus DB
+    timestamp: datetime
+    event_type: str
+    channel: str | None = None
+    session_id: str | None = None
+    repo: str | None = None  # Extracted from channel (e.g., "repo:dotfiles" -> "dotfiles")
+    payload: str | None = None  # Raw payload text
+
+
 # Default database path
 DEFAULT_DB_PATH = Path.home() / ".claude" / "contrib" / "analytics" / "data.db"
 
 # Schema version for migrations
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 # Migration functions: dict of version -> (migration_name, migration_func)
 # Each migration upgrades FROM version-1 TO version
@@ -333,6 +351,32 @@ def migrate_v5(conn):
     # Add indexes for efficient querying
     conn.execute("CREATE INDEX IF NOT EXISTS idx_events_parent_uuid ON events(parent_uuid)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_events_agent_id ON events(agent_id)")
+
+
+@migration(6, "add_event_bus_integration")
+def migrate_v6(conn):
+    """Add table for event-bus integration (RFC #54).
+
+    Stores events from ~/.claude/contrib/event-bus/data.db for cross-session
+    insights like gotcha_discovered, pattern_found, help_needed, etc.
+    """
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS bus_events (
+            id INTEGER PRIMARY KEY,
+            event_id INTEGER UNIQUE NOT NULL,
+            timestamp TIMESTAMP NOT NULL,
+            event_type TEXT NOT NULL,
+            channel TEXT,
+            session_id TEXT,
+            repo TEXT,
+            payload TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_bus_events_timestamp ON bus_events(timestamp)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_bus_events_type ON bus_events(event_type)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_bus_events_session ON bus_events(session_id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_bus_events_repo ON bus_events(repo)")
 
 
 class SQLiteStorage:
@@ -620,6 +664,29 @@ class SQLiteStorage:
                 CREATE INDEX IF NOT EXISTS idx_events_has_user_message
                 ON events(id) WHERE user_message_text IS NOT NULL
             """)
+
+            # Event-bus integration for cross-session insights (RFC #54)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS bus_events (
+                    id INTEGER PRIMARY KEY,
+                    event_id INTEGER UNIQUE NOT NULL,
+                    timestamp TIMESTAMP NOT NULL,
+                    event_type TEXT NOT NULL,
+                    channel TEXT,
+                    session_id TEXT,
+                    repo TEXT,
+                    payload TEXT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_bus_events_timestamp ON bus_events(timestamp)"
+            )
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_bus_events_type ON bus_events(event_type)")
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_bus_events_session ON bus_events(session_id)"
+            )
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_bus_events_repo ON bus_events(repo)")
 
             # Run migrations AFTER all tables are created
             # Only existing databases need migrations - fresh databases have full schema

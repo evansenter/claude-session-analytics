@@ -1802,3 +1802,100 @@ def query_agent_activity(
             ),
         },
     }
+
+
+def query_bus_events(
+    storage: SQLiteStorage,
+    days: int = 7,
+    event_type: str | None = None,
+    session_id: str | None = None,
+    repo: str | None = None,
+    limit: int = 100,
+) -> dict:
+    """Query event-bus events with optional filters.
+
+    Returns raw events from the event-bus for cross-session insights.
+    Events include gotcha_discovered, pattern_found, help_needed, etc.
+
+    Args:
+        storage: Storage instance
+        days: Number of days to analyze (default: 7)
+        event_type: Filter by event type (e.g., 'gotcha_discovered')
+        session_id: Filter by session ID
+        repo: Filter by repo name
+        limit: Maximum events to return (default: 100)
+
+    Returns:
+        Dict with events list and type breakdown
+    """
+    cutoff = get_cutoff(days=days)
+
+    # Build where clause
+    where_parts = ["timestamp >= ?"]
+    params: list = [cutoff]
+
+    if event_type:
+        where_parts.append("event_type = ?")
+        params.append(event_type)
+    if session_id:
+        where_parts.append("session_id = ?")
+        params.append(session_id)
+    if repo:
+        where_parts.append("repo = ?")
+        params.append(repo)
+
+    where_clause = " AND ".join(where_parts)
+    params.append(limit)
+
+    # Get events
+    rows = storage.execute_query(
+        f"""
+        SELECT
+            event_id,
+            timestamp,
+            event_type,
+            channel,
+            session_id,
+            repo,
+            payload
+        FROM bus_events
+        WHERE {where_clause}
+        ORDER BY timestamp DESC
+        LIMIT ?
+        """,
+        tuple(params),
+    )
+
+    events = [
+        {
+            "event_id": row["event_id"],
+            "timestamp": _format_timestamp(row["timestamp"]),
+            "event_type": row["event_type"],
+            "channel": row["channel"],
+            "session_id": row["session_id"],
+            "repo": row["repo"],
+            "payload": row["payload"],
+        }
+        for row in rows
+    ]
+
+    # Get type breakdown
+    type_rows = storage.execute_query(
+        f"""
+        SELECT event_type, COUNT(*) as count
+        FROM bus_events
+        WHERE {" AND ".join(where_parts[:-1]) if len(where_parts) > 1 else where_parts[0]}
+        GROUP BY event_type
+        ORDER BY count DESC
+        """,
+        tuple(params[:-1]),  # Exclude limit param
+    )
+
+    type_counts = {row["event_type"]: row["count"] for row in type_rows}
+
+    return {
+        "days": days,
+        "event_count": len(events),
+        "event_types": type_counts,
+        "events": events,
+    }

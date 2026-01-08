@@ -14,6 +14,7 @@ Parses your Claude Code session logs (`~/.claude/projects/**/*.jsonl`) and provi
 - **Permission gaps** - Commands that should be added to settings.json
 - **Token usage** - Usage breakdown by day, session, or model
 - **Session timeline** - Events across conversations with filtering
+- **Cross-session insights** - Gotchas, patterns, and learnings from [event-bus](https://github.com/evansenter/claude-event-bus)
 
 Data is stored persistently in SQLite and auto-refreshes when stale (>5 min old).
 
@@ -76,6 +77,9 @@ session-analytics-cli git-ingest          # Import git commit history
 session-analytics-cli git-correlate       # Link commits to sessions
 session-analytics-cli session-commits     # Show commits per session
 
+# Event-Bus Integration
+session-analytics-cli bus-events          # Query cross-session events (gotchas, patterns)
+
 # Pattern Inspection
 session-analytics-cli sample-sequences    # Sample instances of a pattern with context
 ```
@@ -87,7 +91,7 @@ All commands support:
 
 ## MCP Tools
 
-28 tools available when running as an MCP server:
+30 tools available when running as an MCP server:
 
 | Category | Tools |
 |----------|-------|
@@ -100,6 +104,7 @@ All commands support:
 | **Messages** | `get_session_messages`, `search_messages` |
 | **Relationships** | `detect_parallel_sessions`, `find_related_sessions` |
 | **Git** | `ingest_git_history`, `correlate_git_with_sessions`, `get_session_commits` |
+| **Event-Bus** | `ingest_bus_events`, `get_bus_events` |
 
 For detailed usage, read the MCP resource `session-analytics://guide` or see [guide.md](src/session_analytics/guide.md).
 
@@ -123,6 +128,7 @@ make check
 
 - **Database**: `~/.claude/contrib/analytics/data.db`
 - **Logs parsed from**: `~/.claude/projects/**/*.jsonl`
+- **Event-bus source**: `~/.claude/contrib/event-bus/data.db` (if [claude-event-bus](https://github.com/evansenter/claude-event-bus) is installed)
 
 ## How It Works
 

@@ -717,6 +717,59 @@ def get_agent_activity(days: int = 7, project: str | None = None) -> dict:
     return {"status": "ok", **result}
 
 
+@mcp.tool()
+def ingest_bus_events(days: int = 7) -> dict:
+    """Ingest events from event-bus for cross-session insights.
+
+    Reads from ~/.claude/contrib/event-bus/data.db and stores
+    events for correlation with session activity.
+
+    Args:
+        days: Number of days to ingest on first run (default: 7)
+
+    Returns:
+        Ingestion statistics including events_ingested count
+    """
+    from session_analytics.bus_ingest import ingest_bus_events as do_ingest
+
+    result = do_ingest(storage, days=days)
+    return {"status": "ok", **result}
+
+
+@mcp.tool()
+def get_bus_events(
+    days: int = 7,
+    event_type: str | None = None,
+    session_id: str | None = None,
+    repo: str | None = None,
+    limit: int = 100,
+) -> dict:
+    """Get event-bus events with optional filters.
+
+    Returns raw events from the event-bus for cross-session insights.
+    Events include gotcha_discovered, pattern_found, help_needed, etc.
+
+    Args:
+        days: Number of days to analyze (default: 7)
+        event_type: Filter by event type (e.g., 'gotcha_discovered')
+        session_id: Filter by session ID
+        repo: Filter by repo name
+        limit: Maximum events to return (default: 100)
+
+    Returns:
+        Event-bus events with breakdown by type
+    """
+    result = queries.query_bus_events(
+        storage,
+        days=days,
+        event_type=event_type,
+        session_id=session_id,
+        repo=repo,
+        limit=limit,
+    )
+    return {"status": "ok", **result}
+
+
 def create_app():
     """Create the ASGI app for uvicorn."""
     # stateless_http=True allows resilience to server restarts

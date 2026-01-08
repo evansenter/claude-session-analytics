@@ -913,6 +913,29 @@ def get_insights(
             logger.warning("Failed to classify sessions in get_insights: %s", e, exc_info=True)
             insights["summary"]["has_classification"] = False
 
+        # Event-bus cross-session activity (RFC #54)
+        try:
+            bus_rows = storage.execute_query(
+                """
+                SELECT event_type, COUNT(*) as count
+                FROM bus_events
+                WHERE timestamp >= datetime('now', ? || ' days')
+                GROUP BY event_type
+                ORDER BY count DESC
+                """,
+                (-days,),
+            )
+            if bus_rows:
+                insights["cross_session_activity"] = {
+                    row["event_type"]: row["count"] for row in bus_rows
+                }
+                insights["summary"]["has_bus_events"] = True
+            else:
+                insights["summary"]["has_bus_events"] = False
+        except Exception as e:
+            logger.warning("Failed to query bus events in get_insights: %s", e, exc_info=True)
+            insights["summary"]["has_bus_events"] = False
+
     return insights
 
 

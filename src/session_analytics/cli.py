@@ -25,6 +25,7 @@ from session_analytics.queries import (
     get_handoff_context,
     get_user_journey,
     query_agent_activity,
+    query_bus_events,
     query_commands,
     query_file_activity,
     query_languages,
@@ -360,7 +361,7 @@ def _format_ingest(data: dict) -> list[str]:
     ]
 
 
-@_register_formatter(lambda d: "event_count" in d)
+@_register_formatter(lambda d: "event_count" in d and "db_path" in d)
 def _format_status(data: dict) -> list[str]:
     lines = [
         "Analytics database status and ingestion info",
@@ -675,6 +676,26 @@ def cmd_agents(args):
     """
     storage = SQLiteStorage()
     result = query_agent_activity(storage, days=args.days, project=args.project)
+    print(format_output(result, args.json))
+
+
+def cmd_bus_events(args):
+    """Show event-bus events for cross-session insights.
+
+    RFC #54: Shows events from event-bus (gotchas, patterns, help, etc.).
+    """
+    from session_analytics.bus_ingest import ingest_bus_events
+
+    storage = SQLiteStorage()
+    # Ingest latest events before querying
+    ingest_bus_events(storage, days=args.days)
+    result = query_bus_events(
+        storage,
+        days=args.days,
+        event_type=args.event_type,
+        repo=args.repo,
+        limit=args.limit,
+    )
     print(format_output(result, args.json))
 
 
@@ -1134,6 +1155,16 @@ Data location: ~/.claude/contrib/analytics/data.db
     sub.add_argument("--days", type=int, default=7, help="Days to analyze (default: 7)")
     sub.add_argument("--project", help="Project path filter")
     sub.set_defaults(func=cmd_agents)
+
+    # bus-events (RFC #54)
+    sub = subparsers.add_parser(
+        "bus-events", help="Show event-bus events (gotchas, patterns, etc.)"
+    )
+    sub.add_argument("--days", type=int, default=7, help="Days to analyze (default: 7)")
+    sub.add_argument("--event-type", help="Filter by event type (e.g., 'gotcha_discovered')")
+    sub.add_argument("--repo", help="Filter by repo name")
+    sub.add_argument("--limit", type=int, default=100, help="Max events to return (default: 100)")
+    sub.set_defaults(func=cmd_bus_events)
 
     args = parser.parse_args()
     args.func(args)

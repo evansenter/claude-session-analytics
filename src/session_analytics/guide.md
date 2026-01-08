@@ -103,6 +103,21 @@ Each session includes `classification_factors` explaining WHY it was categorized
 |------|---------|
 | `get_agent_activity(days?, project?)` | Task subagent activity vs main session (RFC #41) |
 
+### Event-Bus Integration
+
+| Tool | Purpose |
+|------|---------|
+| `ingest_bus_events(days?)` | Import events from event-bus for cross-session insights |
+| `get_bus_events(days?, event_type?, session_id?, repo?, limit?)` | Query event-bus events (gotchas, patterns, help) |
+
+Cross-session events include:
+- `gotcha_discovered` - Non-obvious issues found during work
+- `pattern_found` - Useful patterns identified
+- `help_needed` / `help_response` - Cross-session coordination
+- `task_completed` / `task_started` - Work progress tracking
+
+These appear in `get_insights()` under `cross_session_activity` when available.
+
 ## Quick Start
 
 ### 1. Check status
