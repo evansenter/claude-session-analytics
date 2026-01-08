@@ -4,6 +4,8 @@ Queryable analytics for Claude Code session logs, exposed as an MCP server and C
 
 **API Reference**: `session-analytics-cli --help` or `src/session_analytics/guide.md` (MCP resource: `session-analytics://guide`).
 
+**Schema Design**: See [docs/SCHEMA.md](docs/SCHEMA.md) for database tables, indexes, and migration history.
+
 ---
 
 ## ⚠️ DATABASE PROTECTION

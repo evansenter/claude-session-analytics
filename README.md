@@ -138,6 +138,8 @@ make check
 3. **Auto-refresh**: Queries detect stale data (>5 min) and trigger re-ingestion
 4. **Patterns**: Pre-computes tool sequences and permission gaps for fast queries
 
+See [docs/SCHEMA.md](docs/SCHEMA.md) for detailed database schema documentation.
+
 ## Architecture
 
 Key patterns used in the codebase:
