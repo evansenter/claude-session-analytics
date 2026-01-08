@@ -68,6 +68,7 @@ make reinstall  # pip install -e . + restart (for pyproject.toml)
 1. Query function in `queries.py` (use `build_where_clause()` helper)
 2. MCP tool in `server.py` (naming: `get_*`, `list_*`, `search_*`, `analyze_*`)
 3. CLI command in `cli.py` (formatter via `@_register_formatter`)
-4. Documentation in `guide.md`
-5. Self-play test: can you reach actionable info using only MCP?
-6. Run `make check`
+4. **Add to benchmark**: Update `cmd_benchmark()` in `cli.py` to include the new tool
+5. Documentation in `guide.md`
+6. Self-play test: can you reach actionable info using only MCP?
+7. Run `make check`

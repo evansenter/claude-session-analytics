@@ -3,6 +3,8 @@
 import argparse
 import json
 import sqlite3
+import statistics
+import time
 
 from session_analytics.ingest import (
     correlate_git_with_sessions,
@@ -544,6 +546,35 @@ def _format_session_commits(data: dict) -> list[str]:
     return lines
 
 
+@_register_formatter(lambda d: "benchmarks" in d and "total_tools" in d)
+def _format_benchmark(data: dict) -> list[str]:
+    """Format benchmark results as a table."""
+    lines = [
+        f"Benchmark Results ({data['iterations']} iterations per tool)",
+        f"Total tools: {data['total_tools']}",
+        f"Slow tools (>5s): {data['slow_tools']}",
+        "",
+        f"{'TOOL':<35} {'MEDIAN':>10} {'P95':>10} {'P99':>10} {'STATUS':>10}",
+        "-" * 77,
+    ]
+
+    for bench in data["benchmarks"]:
+        if bench.get("error"):
+            err_msg = bench["error"][:25] if len(bench.get("error", "")) > 25 else bench["error"]
+            lines.append(f"{bench['tool']:<35} {'ERROR':<10} {'---':>10} {'---':>10} {err_msg}")
+            continue
+
+        median = bench["median"]
+        p95 = bench["p95"]
+        p99 = bench["p99"]
+
+        status = "SLOW" if median > 5.0 else "OK"
+
+        lines.append(f"{bench['tool']:<35} {median:>9.3f}s {p95:>9.3f}s {p99:>9.3f}s {status:>10}")
+
+    return lines
+
+
 @_register_formatter(lambda d: "metrics" in d and "tool_changes" in d)
 def _format_trends(data: dict) -> list[str]:
     def format_metric(name: str, metric: dict) -> str:
@@ -971,6 +1002,187 @@ def cmd_session_commits(args):
     print(format_output(result, args.json))
 
 
+def _benchmark_tool(tool_name: str, tool_func: callable, iterations: int = 3) -> dict:
+    """Benchmark a single MCP tool with multiple iterations.
+
+    Returns dict with tool name, median/p95/p99 times in seconds, or error.
+    """
+    times = []
+    error = None
+
+    for _ in range(iterations):
+        try:
+            start = time.perf_counter()
+            tool_func()
+            elapsed = time.perf_counter() - start
+            times.append(elapsed)
+        except Exception as e:
+            error = str(e)
+            break
+
+    if not times:
+        return {
+            "tool": tool_name,
+            "error": error,
+            "median": None,
+            "p95": None,
+            "p99": None,
+        }
+
+    times.sort()
+    n = len(times)
+    return {
+        "tool": tool_name,
+        "median": statistics.median(times),
+        "p95": times[min(n - 1, int(n * 0.95))],
+        "p99": times[min(n - 1, int(n * 0.99))],
+        "error": None,
+    }
+
+
+def cmd_benchmark(args):
+    """Benchmark all MCP tools against real database.
+
+    Issue #63: Measures response times for all MCP tools to identify
+    slow queries and establish performance baselines.
+
+    Note: When adding new MCP tools, add them to the tool_functions dict below.
+    """
+    from session_analytics.patterns import (
+        analyze_failures as patterns_analyze_failures,
+    )
+    from session_analytics.patterns import (
+        analyze_trends as patterns_analyze_trends,
+    )
+    from session_analytics.patterns import (
+        compute_permission_gaps as patterns_compute_permission_gaps,
+    )
+    from session_analytics.patterns import (
+        compute_sequence_patterns as patterns_compute_sequence_patterns,
+    )
+    from session_analytics.patterns import (
+        get_insights as patterns_get_insights,
+    )
+    from session_analytics.patterns import (
+        get_session_signals as patterns_get_session_signals,
+    )
+    from session_analytics.patterns import (
+        sample_sequences as patterns_sample_sequences,
+    )
+    from session_analytics.queries import (
+        classify_sessions as queries_classify_sessions,
+    )
+    from session_analytics.queries import (
+        detect_parallel_sessions as queries_detect_parallel_sessions,
+    )
+    from session_analytics.queries import (
+        get_handoff_context as queries_get_handoff_context,
+    )
+    from session_analytics.queries import (
+        get_user_journey as queries_get_user_journey,
+    )
+    from session_analytics.queries import (
+        query_agent_activity as queries_query_agent_activity,
+    )
+    from session_analytics.queries import (
+        query_bus_events as queries_query_bus_events,
+    )
+    from session_analytics.queries import (
+        query_commands as queries_query_commands,
+    )
+    from session_analytics.queries import (
+        query_error_details as queries_query_error_details,
+    )
+    from session_analytics.queries import (
+        query_file_activity as queries_query_file_activity,
+    )
+    from session_analytics.queries import (
+        query_languages as queries_query_languages,
+    )
+    from session_analytics.queries import (
+        query_mcp_usage as queries_query_mcp_usage,
+    )
+    from session_analytics.queries import (
+        query_projects as queries_query_projects,
+    )
+    from session_analytics.queries import (
+        query_sessions as queries_query_sessions,
+    )
+    from session_analytics.queries import (
+        query_timeline as queries_query_timeline,
+    )
+    from session_analytics.queries import (
+        query_tokens as queries_query_tokens,
+    )
+    from session_analytics.queries import (
+        query_tool_frequency as queries_query_tool_frequency,
+    )
+
+    storage = SQLiteStorage()
+    iterations = args.iterations
+
+    # Define all MCP tools with their default parameters
+    # These call the underlying query functions directly (not the MCP wrappers)
+    # Skip mutating tools (ingest_*) and tools requiring specific IDs
+    tool_functions = {
+        "get_status": lambda: storage.get_db_stats(),
+        "get_tool_frequency": lambda: queries_query_tool_frequency(storage, days=7),
+        "get_session_events": lambda: queries_query_timeline(storage, limit=10),
+        "get_command_frequency": lambda: queries_query_commands(storage, days=7),
+        "list_sessions": lambda: queries_query_sessions(storage, days=7),
+        "get_token_usage": lambda: queries_query_tokens(storage, days=7),
+        "get_tool_sequences": lambda: patterns_compute_sequence_patterns(storage, days=7),
+        "sample_sequences": lambda: patterns_sample_sequences(
+            storage, pattern="Read → Edit", count=2
+        ),
+        "get_permission_gaps": lambda: patterns_compute_permission_gaps(storage, days=7),
+        "get_session_messages": lambda: queries_get_user_journey(storage, hours=24),
+        "search_messages": lambda: storage.search_user_messages("test", limit=10),
+        "detect_parallel_sessions": lambda: queries_detect_parallel_sessions(storage, hours=24),
+        "get_insights": lambda: patterns_get_insights(storage, refresh=False, days=7),
+        "analyze_failures": lambda: patterns_analyze_failures(storage, days=7),
+        "get_error_details": lambda: queries_query_error_details(storage, days=7, limit=10),
+        "classify_sessions": lambda: queries_classify_sessions(storage, days=7),
+        "get_handoff_context": lambda: queries_get_handoff_context(storage, hours=4),
+        "analyze_trends": lambda: patterns_analyze_trends(storage, days=7),
+        "get_session_signals": lambda: patterns_get_session_signals(storage, days=7),
+        "get_session_commits": lambda: storage.get_session_commits(None),
+        "get_file_activity": lambda: queries_query_file_activity(storage, days=7),
+        "get_languages": lambda: queries_query_languages(storage, days=7),
+        "get_projects": lambda: queries_query_projects(storage, days=7),
+        "get_mcp_usage": lambda: queries_query_mcp_usage(storage, days=7),
+        "get_agent_activity": lambda: queries_query_agent_activity(storage, days=7),
+        "get_bus_events": lambda: queries_query_bus_events(storage, days=7, limit=10),
+    }
+
+    # Skipped tools (require specific data or modify DB):
+    # - ingest_logs, ingest_git_history, correlate_git_with_sessions, ingest_bus_events
+    # - find_related_sessions (requires valid session_id)
+
+    benchmarks = []
+    for tool_name, tool_func in tool_functions.items():
+        print(f"Benchmarking {tool_name}...", end=" ", flush=True)
+        result = _benchmark_tool(tool_name, tool_func, iterations=iterations)
+        benchmarks.append(result)
+        status = "ERROR" if result.get("error") else f"{result['median']:.3f}s"
+        print(status)
+
+    # Sort by median time (slowest first), errors at bottom
+    benchmarks.sort(key=lambda x: (x["median"] is None, -(x["median"] or 0)))
+
+    slow_count = sum(1 for b in benchmarks if b.get("median") and b["median"] > 5.0)
+
+    output = {
+        "total_tools": len(benchmarks),
+        "iterations": iterations,
+        "slow_tools": slow_count,
+        "benchmarks": benchmarks,
+    }
+
+    print()  # Blank line before results table
+    print(format_output(output, args.json))
+
+
 def main():
     """CLI entry point."""
     epilog = """
@@ -1223,6 +1435,16 @@ Data location: ~/.claude/contrib/analytics/data.db
     sub.add_argument("--repo", help="Filter by repo name")
     sub.add_argument("--limit", type=int, default=100, help="Max events to return (default: 100)")
     sub.set_defaults(func=cmd_bus_events)
+
+    # benchmark (Issue #63)
+    sub = subparsers.add_parser("benchmark", help="Benchmark all MCP tool response times")
+    sub.add_argument(
+        "--iterations",
+        type=int,
+        default=3,
+        help="Iterations per tool (default: 3; use 10+ for meaningful p95/p99)",
+    )
+    sub.set_defaults(func=cmd_benchmark)
 
     args = parser.parse_args()
     args.func(args)

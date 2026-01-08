@@ -83,6 +83,9 @@ session-analytics-cli bus-events          # Query cross-session events (gotchas,
 
 # Pattern Inspection
 session-analytics-cli sample-sequences    # Sample instances of a pattern with context
+
+# Performance
+session-analytics-cli benchmark           # Benchmark all MCP tool response times
 ```
 
 All commands support:

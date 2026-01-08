@@ -4,6 +4,7 @@ from datetime import datetime
 from unittest.mock import patch
 
 from session_analytics.cli import (
+    cmd_benchmark,
     cmd_classify,
     cmd_commands,
     cmd_failures,
@@ -115,6 +116,23 @@ class TestFormatOutput:
         result = format_output(data)
         assert "Pre-computed patterns" in result
         assert "Tools tracked: 10" in result
+
+    def test_benchmark_format(self):
+        """Test benchmark formatting."""
+        data = {
+            "benchmarks": [
+                {"tool": "get_status", "median": 0.005, "p95": 0.006, "p99": 0.006},
+                {"tool": "get_tool_frequency", "median": 0.123, "p95": 0.145, "p99": 0.145},
+            ],
+            "total_tools": 2,
+            "slow_tools": 0,
+            "iterations": 3,
+        }
+        result = format_output(data)
+        assert "Benchmark Results" in result
+        assert "Total tools: 2" in result
+        assert "Slow tools" in result
+        assert "get_status" in result
 
 
 class TestCliCommands:
@@ -625,6 +643,20 @@ class TestCliCommands:
 
         captured = capsys.readouterr()
         assert "correlat" in captured.out.lower() or "commit" in captured.out.lower()
+
+    def test_cmd_benchmark(self, populated_storage, capsys):
+        """Test benchmark command."""
+
+        class Args:
+            json = False
+            iterations = 1  # Minimal iterations for speed
+
+        with patch("session_analytics.cli.SQLiteStorage", return_value=populated_storage):
+            cmd_benchmark(Args())
+
+        captured = capsys.readouterr()
+        assert "Benchmark Results" in captured.out
+        assert "Total tools:" in captured.out
 
 
 class TestRFC26Formatters:
