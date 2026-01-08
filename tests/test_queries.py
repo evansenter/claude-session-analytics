@@ -7,6 +7,7 @@ from session_analytics.queries import (
     get_cutoff,
     query_agent_activity,
     query_commands,
+    query_error_details,
     query_file_activity,
     query_languages,
     query_mcp_usage,
@@ -1859,3 +1860,361 @@ class TestQueryAgentActivity:
 
         # Should not raise ZeroDivisionError
         assert result["summary"]["agent_token_percentage"] == 0
+
+
+class TestQueryErrorDetails:
+    """Tests for query_error_details().
+
+    RFC #60: Shows which specific parameters (patterns, commands, files)
+    caused tool errors, enabling drill-down from aggregate error counts.
+    """
+
+    def test_basic_error_aggregation(self, storage):
+        """Test basic error aggregation by tool and parameter."""
+        import json
+
+        now = datetime.now()
+
+        # Create tool_use events with tool_input_json
+        events = [
+            # Glob error with pattern
+            Event(
+                id=None,
+                uuid="glob-use-1",
+                timestamp=now - timedelta(hours=1),
+                session_id="s1",
+                project_path="-test-project",
+                entry_type="tool_use",
+                tool_name="Glob",
+                tool_id="tool-glob-1",
+                tool_input_json=json.dumps({"pattern": "*.py", "path": "/src"}),
+            ),
+            Event(
+                id=None,
+                uuid="glob-result-1",
+                timestamp=now - timedelta(hours=1, seconds=1),
+                session_id="s1",
+                project_path="-test-project",
+                entry_type="tool_result",
+                tool_id="tool-glob-1",
+                is_error=True,
+            ),
+            # Another Glob error with same pattern (should aggregate)
+            Event(
+                id=None,
+                uuid="glob-use-2",
+                timestamp=now - timedelta(hours=2),
+                session_id="s1",
+                project_path="-test-project",
+                entry_type="tool_use",
+                tool_name="Glob",
+                tool_id="tool-glob-2",
+                tool_input_json=json.dumps({"pattern": "*.py", "path": "/src"}),
+            ),
+            Event(
+                id=None,
+                uuid="glob-result-2",
+                timestamp=now - timedelta(hours=2, seconds=1),
+                session_id="s1",
+                project_path="-test-project",
+                entry_type="tool_result",
+                tool_id="tool-glob-2",
+                is_error=True,
+            ),
+            # Bash error with command
+            Event(
+                id=None,
+                uuid="bash-use-1",
+                timestamp=now - timedelta(hours=3),
+                session_id="s1",
+                project_path="-test-project",
+                entry_type="tool_use",
+                tool_name="Bash",
+                tool_id="tool-bash-1",
+                command="git",
+                command_args="status",
+            ),
+            Event(
+                id=None,
+                uuid="bash-result-1",
+                timestamp=now - timedelta(hours=3, seconds=1),
+                session_id="s1",
+                project_path="-test-project",
+                entry_type="tool_result",
+                tool_id="tool-bash-1",
+                is_error=True,
+            ),
+        ]
+        storage.add_events_batch(events)
+
+        result = query_error_details(storage, days=7)
+
+        assert result["days"] == 7
+        assert result["total_errors"] == 3
+        assert "Glob" in result["errors_by_tool"]
+        assert "Bash" in result["errors_by_tool"]
+
+        # Glob should have aggregated the 2 errors with same pattern
+        glob_errors = result["errors_by_tool"]["Glob"]
+        assert len(glob_errors) == 1
+        assert glob_errors[0]["param_type"] == "pattern"
+        assert glob_errors[0]["param_value"] == "*.py"
+        assert glob_errors[0]["error_count"] == 2
+
+        # Bash should have 1 error
+        bash_errors = result["errors_by_tool"]["Bash"]
+        assert len(bash_errors) == 1
+        assert bash_errors[0]["param_type"] == "command"
+        assert bash_errors[0]["param_value"] == "git"
+        assert bash_errors[0]["error_count"] == 1
+
+    def test_tool_filter(self, storage):
+        """Test filtering errors by specific tool."""
+        import json
+
+        now = datetime.now()
+
+        events = [
+            # Glob error
+            Event(
+                id=None,
+                uuid="glob-use",
+                timestamp=now - timedelta(hours=1),
+                session_id="s1",
+                project_path="-test-project",
+                entry_type="tool_use",
+                tool_name="Glob",
+                tool_id="tool-glob",
+                tool_input_json=json.dumps({"pattern": "*.rs"}),
+            ),
+            Event(
+                id=None,
+                uuid="glob-result",
+                timestamp=now - timedelta(hours=1, seconds=1),
+                session_id="s1",
+                project_path="-test-project",
+                entry_type="tool_result",
+                tool_id="tool-glob",
+                is_error=True,
+            ),
+            # Bash error
+            Event(
+                id=None,
+                uuid="bash-use",
+                timestamp=now - timedelta(hours=2),
+                session_id="s1",
+                project_path="-test-project",
+                entry_type="tool_use",
+                tool_name="Bash",
+                tool_id="tool-bash",
+                command="make",
+            ),
+            Event(
+                id=None,
+                uuid="bash-result",
+                timestamp=now - timedelta(hours=2, seconds=1),
+                session_id="s1",
+                project_path="-test-project",
+                entry_type="tool_result",
+                tool_id="tool-bash",
+                is_error=True,
+            ),
+        ]
+        storage.add_events_batch(events)
+
+        # Filter to only Glob errors
+        result = query_error_details(storage, days=7, tool="Glob")
+
+        assert result["tool_filter"] == "Glob"
+        assert result["total_errors"] == 1
+        assert "Glob" in result["errors_by_tool"]
+        assert "Bash" not in result["errors_by_tool"]
+
+    def test_limit_parameter(self, storage):
+        """Test that limit parameter caps errors per tool."""
+        import json
+
+        now = datetime.now()
+
+        events = []
+        # Create 5 different Glob errors with different patterns
+        for i in range(5):
+            events.extend(
+                [
+                    Event(
+                        id=None,
+                        uuid=f"glob-use-{i}",
+                        timestamp=now - timedelta(hours=i),
+                        session_id="s1",
+                        project_path="-test-project",
+                        entry_type="tool_use",
+                        tool_name="Glob",
+                        tool_id=f"tool-glob-{i}",
+                        tool_input_json=json.dumps({"pattern": f"pattern-{i}"}),
+                    ),
+                    Event(
+                        id=None,
+                        uuid=f"glob-result-{i}",
+                        timestamp=now - timedelta(hours=i, seconds=1),
+                        session_id="s1",
+                        project_path="-test-project",
+                        entry_type="tool_result",
+                        tool_id=f"tool-glob-{i}",
+                        is_error=True,
+                    ),
+                ]
+            )
+        storage.add_events_batch(events)
+
+        # Limit to 2 per tool
+        result = query_error_details(storage, days=7, limit=2)
+
+        # Should only have 2 errors in the details, but total should reflect all
+        assert len(result["errors_by_tool"]["Glob"]) == 2
+        assert result["tool_totals"]["Glob"] == 5
+
+    def test_file_path_errors(self, storage):
+        """Test that file operation errors show file_path."""
+        now = datetime.now()
+
+        events = [
+            Event(
+                id=None,
+                uuid="edit-use",
+                timestamp=now - timedelta(hours=1),
+                session_id="s1",
+                project_path="-test-project",
+                entry_type="tool_use",
+                tool_name="Edit",
+                tool_id="tool-edit",
+                file_path="/path/to/missing.py",
+            ),
+            Event(
+                id=None,
+                uuid="edit-result",
+                timestamp=now - timedelta(hours=1, seconds=1),
+                session_id="s1",
+                project_path="-test-project",
+                entry_type="tool_result",
+                tool_id="tool-edit",
+                is_error=True,
+            ),
+        ]
+        storage.add_events_batch(events)
+
+        result = query_error_details(storage, days=7)
+
+        assert "Edit" in result["errors_by_tool"]
+        edit_errors = result["errors_by_tool"]["Edit"]
+        assert len(edit_errors) == 1
+        assert edit_errors[0]["param_type"] == "file_path"
+        assert edit_errors[0]["param_value"] == "/path/to/missing.py"
+
+    def test_grep_pattern_with_search_path(self, storage):
+        """Test that Grep errors include search_path when available."""
+        import json
+
+        now = datetime.now()
+
+        events = [
+            Event(
+                id=None,
+                uuid="grep-use",
+                timestamp=now - timedelta(hours=1),
+                session_id="s1",
+                project_path="-test-project",
+                entry_type="tool_use",
+                tool_name="Grep",
+                tool_id="tool-grep",
+                tool_input_json=json.dumps({"pattern": "TODO", "path": "/src"}),
+            ),
+            Event(
+                id=None,
+                uuid="grep-result",
+                timestamp=now - timedelta(hours=1, seconds=1),
+                session_id="s1",
+                project_path="-test-project",
+                entry_type="tool_result",
+                tool_id="tool-grep",
+                is_error=True,
+            ),
+        ]
+        storage.add_events_batch(events)
+
+        result = query_error_details(storage, days=7)
+
+        grep_errors = result["errors_by_tool"]["Grep"]
+        assert len(grep_errors) == 1
+        assert grep_errors[0]["param_type"] == "pattern"
+        assert grep_errors[0]["param_value"] == "TODO"
+        assert grep_errors[0]["search_path"] == "/src"
+
+    def test_no_errors(self, storage):
+        """Test with no errors in the database."""
+        result = query_error_details(storage, days=7)
+
+        assert result["total_errors"] == 0
+        assert result["errors_by_tool"] == {}
+
+    def test_days_filter(self, storage):
+        """Test that days filter excludes old errors."""
+        import json
+
+        now = datetime.now()
+
+        events = [
+            # Recent error (1 hour ago)
+            Event(
+                id=None,
+                uuid="recent-use",
+                timestamp=now - timedelta(hours=1),
+                session_id="s1",
+                project_path="-test-project",
+                entry_type="tool_use",
+                tool_name="Glob",
+                tool_id="tool-recent",
+                tool_input_json=json.dumps({"pattern": "recent"}),
+            ),
+            Event(
+                id=None,
+                uuid="recent-result",
+                timestamp=now - timedelta(hours=1, seconds=1),
+                session_id="s1",
+                project_path="-test-project",
+                entry_type="tool_result",
+                tool_id="tool-recent",
+                is_error=True,
+            ),
+            # Old error (10 days ago)
+            Event(
+                id=None,
+                uuid="old-use",
+                timestamp=now - timedelta(days=10),
+                session_id="s1",
+                project_path="-test-project",
+                entry_type="tool_use",
+                tool_name="Glob",
+                tool_id="tool-old",
+                tool_input_json=json.dumps({"pattern": "old"}),
+            ),
+            Event(
+                id=None,
+                uuid="old-result",
+                timestamp=now - timedelta(days=10, seconds=1),
+                session_id="s1",
+                project_path="-test-project",
+                entry_type="tool_result",
+                tool_id="tool-old",
+                is_error=True,
+            ),
+        ]
+        storage.add_events_batch(events)
+
+        # 7 days should only get recent error
+        result = query_error_details(storage, days=7)
+        assert result["total_errors"] == 1
+        assert result["errors_by_tool"]["Glob"][0]["param_value"] == "recent"
+
+        # 30 days should get both errors
+        result_30 = query_error_details(storage, days=30)
+        assert result_30["total_errors"] == 2
