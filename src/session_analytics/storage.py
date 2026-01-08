@@ -166,7 +166,7 @@ class BusEvent:
 DEFAULT_DB_PATH = Path.home() / ".claude" / "contrib" / "analytics" / "data.db"
 
 # Schema version for migrations
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 # Migration functions: dict of version -> (migration_name, migration_func)
 # Each migration upgrades FROM version-1 TO version
@@ -377,6 +377,17 @@ def migrate_v6(conn):
     conn.execute("CREATE INDEX IF NOT EXISTS idx_bus_events_type ON bus_events(event_type)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_bus_events_session ON bus_events(session_id)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_bus_events_repo ON bus_events(repo)")
+
+
+@migration(7, "add_tool_id_index")
+def migrate_v7(conn):
+    """Add index on tool_id for faster self-joins.
+
+    The query_error_details() function joins events to itself on tool_id
+    to correlate tool_result errors with their tool_use parameters.
+    Without this index, queries took ~25s on 160K events.
+    """
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_events_tool_id ON events(tool_id)")
 
 
 class SQLiteStorage:
@@ -704,6 +715,9 @@ class SQLiteStorage:
             # These run AFTER migrations so columns exist on both fresh and migrated DBs
             conn.execute("CREATE INDEX IF NOT EXISTS idx_events_parent_uuid ON events(parent_uuid)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_events_agent_id ON events(agent_id)")
+
+            # Performance index for tool_use ↔ tool_result self-joins (migration v7)
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_events_tool_id ON events(tool_id)")
 
     # Event operations
 

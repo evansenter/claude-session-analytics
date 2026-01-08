@@ -982,3 +982,9 @@ class TestAgentTrackingFields:
         rows = storage.execute_query("PRAGMA index_list(events)")
         indexes = {row[1] for row in rows}
         assert "idx_events_agent_id" in indexes
+
+    def test_index_on_tool_id(self, storage):
+        """Verify that idx_events_tool_id index exists for self-join performance."""
+        rows = storage.execute_query("PRAGMA index_list(events)")
+        indexes = {row[1] for row in rows}
+        assert "idx_events_tool_id" in indexes
