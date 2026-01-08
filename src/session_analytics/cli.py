@@ -401,6 +401,44 @@ def _format_failures(data: dict) -> list[str]:
     return lines
 
 
+@_register_formatter(lambda d: "errors_by_tool" in d and "tool_totals" in d)
+def _format_error_details(data: dict) -> list[str]:
+    lines = [
+        f"Error Details (last {data['days']} days)",
+        f"Total errors: {data['total_errors']}",
+    ]
+    if data.get("tool_filter"):
+        lines.append(f"Filter: {data['tool_filter']}")
+    lines.append("")
+
+    errors_by_tool = data.get("errors_by_tool", {})
+    tool_totals = data.get("tool_totals", {})
+
+    if not errors_by_tool:
+        lines.append("No errors found.")
+        return lines
+
+    for tool_name in sorted(errors_by_tool.keys(), key=lambda t: -tool_totals.get(t, 0)):
+        total = tool_totals.get(tool_name, 0)
+        lines.append(f"{tool_name} ({total} errors):")
+        for err in errors_by_tool[tool_name][:10]:
+            param = err.get("param_value") or "(unknown)"
+            count = err.get("error_count", 0)
+            suffix = ""
+            if err.get("search_path"):
+                suffix = f" in {err['search_path']}"
+            elif err.get("project"):
+                # Extract repo name from project path
+                proj = err["project"]
+                if proj:
+                    proj = proj.split("-")[-1] if "-" in proj else proj
+                    suffix = f" ({proj})"
+            lines.append(f"  {param!r}: {count} errors{suffix}")
+        lines.append("")
+
+    return lines
+
+
 @_register_formatter(lambda d: "category_distribution" in d and "sessions" in d)
 def _format_classify_sessions(data: dict) -> list[str]:
     lines = [
