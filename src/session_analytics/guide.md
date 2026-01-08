@@ -46,11 +46,17 @@ identify permission gaps.
 | Tool | Purpose |
 |------|---------|
 | `analyze_failures(days?, project?)` | Failure patterns with drill-down to specific commands |
+| `get_error_details(days?, tool?, limit?)` | Detailed errors with tool parameters (patterns, commands, files) |
 
-Returns:
+`analyze_failures()` returns:
 - `errors_by_tool`: Count of errors per tool
 - `error_examples`: Top failing commands (Bash) or files (Edit/Read/Write) for drill-down
 - `rework_patterns`: Files edited 3+ times within 10 minutes
+
+`get_error_details()` shows *which specific parameters* caused failures:
+- Glob/Grep: The pattern that failed (e.g., `"*"` with 922 errors)
+- Bash: The command that failed (e.g., `pwd` with 492 errors)
+- Edit/Read/Write: The file path that failed
 
 ### Session Classification
 

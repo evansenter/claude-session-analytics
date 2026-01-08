@@ -459,6 +459,26 @@ def analyze_failures(days: int = 7, rework_window_minutes: int = 10) -> dict:
 
 
 @mcp.tool()
+def get_error_details(days: int = 7, tool: str | None = None, limit: int = 50) -> dict:
+    """Get detailed error information including tool parameters that caused failures.
+
+    Shows which specific patterns (Glob/Grep), commands (Bash), or files caused errors.
+    Use this to drill down from analyze_failures() counts to actionable specifics.
+
+    Args:
+        days: Number of days to analyze (default: 7)
+        tool: Optional filter by tool name (e.g., "Glob", "Bash", "Edit")
+        limit: Maximum errors to return per tool (default: 50)
+
+    Returns:
+        Error details grouped by tool with the failing parameter (pattern/command/file)
+    """
+    queries.ensure_fresh_data(storage, days=days)
+    result = queries.query_error_details(storage, days=days, tool=tool, limit=limit)
+    return {"status": "ok", **result}
+
+
+@mcp.tool()
 def classify_sessions(days: int = 7, project: str | None = None) -> dict:
     """Classify sessions based on their dominant activity patterns.
 

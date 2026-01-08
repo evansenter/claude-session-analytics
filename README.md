@@ -61,6 +61,7 @@ session-analytics-cli agents              # Task subagent activity vs main sessi
 session-analytics-cli signals             # Raw session metrics for LLM interpretation
 session-analytics-cli classify            # Categorize sessions (debug/dev/research)
 session-analytics-cli failures            # Error patterns and rework detection
+session-analytics-cli error-details       # Detailed errors with tool parameters
 session-analytics-cli trends              # Compare usage across time periods
 session-analytics-cli handoff             # Context summary for session handoff
 
@@ -91,7 +92,7 @@ All commands support:
 
 ## MCP Tools
 
-30 tools available when running as an MCP server:
+31 tools available when running as an MCP server:
 
 | Category | Tools |
 |----------|-------|
@@ -100,7 +101,7 @@ All commands support:
 | **Patterns** | `get_tool_sequences`, `sample_sequences`, `get_permission_gaps`, `get_insights` |
 | **Files** | `get_file_activity`, `get_languages`, `get_projects`, `get_mcp_usage` |
 | **Agents** | `get_agent_activity` |
-| **Sessions** | `get_session_signals`, `classify_sessions`, `analyze_failures`, `analyze_trends`, `get_handoff_context` |
+| **Sessions** | `get_session_signals`, `classify_sessions`, `analyze_failures`, `get_error_details`, `analyze_trends`, `get_handoff_context` |
 | **Messages** | `get_session_messages`, `search_messages` |
 | **Relationships** | `detect_parallel_sessions`, `find_related_sessions` |
 | **Git** | `ingest_git_history`, `correlate_git_with_sessions`, `get_session_commits` |

@@ -1899,3 +1899,109 @@ def query_bus_events(
         "event_types": type_counts,
         "events": events,
     }
+
+
+def query_error_details(
+    storage: SQLiteStorage,
+    days: int = 7,
+    tool: str | None = None,
+    limit: int = 50,
+) -> dict:
+    """Get detailed error information including tool parameters that caused failures.
+
+    Joins tool_result errors with tool_use events to extract the parameters
+    (pattern for Glob/Grep, command for Bash, file_path for file operations)
+    that caused the failure.
+
+    Args:
+        storage: Storage instance
+        days: Number of days to analyze (default: 7)
+        tool: Optional filter by tool name (e.g., "Glob", "Bash")
+        limit: Maximum errors to return per tool (default: 50)
+
+    Returns:
+        Dict with error details grouped by tool and parameter
+    """
+    cutoff = get_cutoff(days=days)
+
+    # Build tool filter
+    tool_filter = ""
+    params: list = [cutoff]
+    if tool:
+        tool_filter = "AND e2.tool_name = ?"
+        params.append(tool)
+
+    # Query errors with tool parameters
+    # Uses json_extract to get the relevant parameter based on tool type:
+    # - Glob/Grep: pattern
+    # - Bash: command (already extracted to column)
+    # - Read/Edit/Write: file_path (already extracted to column)
+    rows = storage.execute_query(
+        f"""
+        SELECT
+            e2.tool_name,
+            e2.command,
+            e2.file_path,
+            json_extract(e2.tool_input_json, '$.pattern') as pattern,
+            json_extract(e2.tool_input_json, '$.path') as search_path,
+            e1.project_path,
+            COUNT(*) as error_count
+        FROM events e1
+        JOIN events e2 ON e1.tool_id = e2.tool_id AND e2.entry_type = 'tool_use'
+        WHERE e1.timestamp >= ?
+          AND e1.is_error = 1
+          AND e1.entry_type = 'tool_result'
+          {tool_filter}
+        GROUP BY e2.tool_name, e2.command, e2.file_path, pattern, search_path, e1.project_path
+        ORDER BY e2.tool_name, error_count DESC
+        """,
+        tuple(params),
+    )
+
+    # Organize by tool with the relevant parameter
+    errors_by_tool: dict[str, list[dict]] = {}
+    tool_totals: dict[str, int] = {}
+
+    for row in rows:
+        tool_name = row["tool_name"]
+        if not tool_name:
+            continue
+
+        # Determine the key parameter based on tool type
+        if tool_name in ("Glob", "Grep"):
+            key_param = row["pattern"]
+            param_type = "pattern"
+        elif tool_name == "Bash":
+            key_param = row["command"]
+            param_type = "command"
+        else:
+            key_param = row["file_path"]
+            param_type = "file_path"
+
+        if tool_name not in errors_by_tool:
+            errors_by_tool[tool_name] = []
+            tool_totals[tool_name] = 0
+
+        tool_totals[tool_name] += row["error_count"]
+
+        # Only keep top N per tool
+        if len(errors_by_tool[tool_name]) < limit:
+            error_detail = {
+                "param_type": param_type,
+                "param_value": key_param,
+                "error_count": row["error_count"],
+                "project": row["project_path"],
+            }
+            # Add search_path for Glob/Grep if present
+            if tool_name in ("Glob", "Grep") and row["search_path"]:
+                error_detail["search_path"] = row["search_path"]
+
+            errors_by_tool[tool_name].append(error_detail)
+
+    return {
+        "days": days,
+        "tool_filter": tool,
+        "errors_by_tool": errors_by_tool,
+        "tool_totals": tool_totals,
+        "total_errors": sum(tool_totals.values()),
+    }

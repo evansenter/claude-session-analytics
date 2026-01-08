@@ -27,6 +27,7 @@ from session_analytics.queries import (
     query_agent_activity,
     query_bus_events,
     query_commands,
+    query_error_details,
     query_file_activity,
     query_languages,
     query_mcp_usage,
@@ -806,6 +807,18 @@ def cmd_failures(args):
     print(format_output(result, args.json))
 
 
+def cmd_error_details(args):
+    """Show detailed error information with tool parameters."""
+    storage = SQLiteStorage()
+    result = query_error_details(
+        storage,
+        days=args.days,
+        tool=args.tool,
+        limit=args.limit,
+    )
+    print(format_output(result, args.json))
+
+
 def cmd_classify(args):
     """Show session classifications."""
     storage = SQLiteStorage()
@@ -1068,6 +1081,13 @@ Data location: ~/.claude/contrib/analytics/data.db
         "--rework-window", type=int, default=10, help="Rework window in minutes (default: 10)"
     )
     sub.set_defaults(func=cmd_failures)
+
+    # error-details
+    sub = subparsers.add_parser("error-details", help="Show error details with tool parameters")
+    sub.add_argument("--days", type=int, default=7, help="Days to analyze (default: 7)")
+    sub.add_argument("--tool", help="Filter by tool name (e.g., Glob, Bash, Edit)")
+    sub.add_argument("--limit", type=int, default=50, help="Max errors per tool (default: 50)")
+    sub.set_defaults(func=cmd_error_details)
 
     # classify
     sub = subparsers.add_parser("classify", help="Classify sessions by activity type")
