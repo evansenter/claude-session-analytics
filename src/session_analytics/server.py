@@ -843,6 +843,7 @@ def get_compaction_events(
     days: int = 7,
     session_id: str | None = None,
     limit: int = 50,
+    aggregate: bool = False,
 ) -> dict:
     """List compaction events (context resets) across sessions.
 
@@ -853,12 +854,16 @@ def get_compaction_events(
         days: Number of days to analyze (default: 7)
         session_id: Filter to specific session
         limit: Maximum events to return (default: 50)
+        aggregate: If True, group by session with counts instead of individual events
 
     Returns:
         List of compaction events with timestamps and session info
+        (or session aggregates if aggregate=True)
     """
     queries.ensure_fresh_data(storage, days=days)
-    result = queries.get_compaction_events(storage, days=days, session_id=session_id, limit=limit)
+    result = queries.get_compaction_events(
+        storage, days=days, session_id=session_id, limit=limit, aggregate=aggregate
+    )
     return {"status": "ok", **result}
 
 
@@ -887,6 +892,35 @@ def get_pre_compaction_events(
         session_id=session_id,
         compaction_timestamp=compaction_timestamp,
         limit=limit,
+    )
+    return {"status": "ok", **result}
+
+
+@mcp.tool()
+def analyze_pre_compaction_patterns(
+    days: int = 7,
+    events_before: int = 50,
+    limit: int = 20,
+) -> dict:
+    """Analyze patterns in events leading up to compactions.
+
+    RFC #81: Identifies antipatterns that accelerate context exhaustion:
+    - Consecutive reads without edits (exploration without action)
+    - Files read multiple times before compaction
+    - Large tool results that bloated context
+    - Tool distribution before compaction
+
+    Args:
+        days: Number of days to analyze (default: 7)
+        events_before: Events to analyze before each compaction (default: 50)
+        limit: Max compactions to analyze (default: 20)
+
+    Returns:
+        Dict with aggregated patterns and recommendations
+    """
+    queries.ensure_fresh_data(storage, days=days)
+    result = queries.analyze_pre_compaction_patterns(
+        storage, days=days, events_before=events_before, limit=limit
     )
     return {"status": "ok", **result}
 

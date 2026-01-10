@@ -131,8 +131,9 @@ Returns both core metrics (`events`, `sessions`, `errors`, `tokens`) and `effici
 
 | Tool | Purpose |
 |------|---------|
-| `get_compaction_events(days?, session_id?, limit?)` | List compaction events (context resets) |
+| `get_compaction_events(days?, session_id?, limit?, aggregate?)` | List compaction events (context resets) |
 | `get_pre_compaction_events(session_id, compaction_timestamp, limit?)` | Events before a compaction for analysis |
+| `analyze_pre_compaction_patterns(days?, events_before?, limit?)` | Aggregated patterns before compactions (RFC #81) |
 | `get_large_tool_results(days?, min_size_kb?, limit?)` | Find tool results consuming context space |
 | `get_session_efficiency(days?, project?, limit?)` | Session efficiency metrics and burn rate |
 
@@ -231,10 +232,12 @@ analyze_trends()      → "Usage is increasing/decreasing"
 ### Workflow: Context Efficiency
 
 ```
-get_compaction_events()     → "When did context resets happen?"
-get_session_efficiency()    → "Which sessions burn context fastest?"
-get_large_tool_results()    → "What operations consume the most space?"
-get_pre_compaction_events() → "What led up to a specific reset?"
+get_compaction_events()               → "When did context resets happen?"
+get_compaction_events(aggregate=True) → "Which sessions had most compactions?"
+analyze_pre_compaction_patterns()     → "What patterns precede compactions?" (RFC #81)
+get_session_efficiency()              → "Which sessions burn context fastest?"
+get_large_tool_results()              → "What operations consume the most space?"
+get_pre_compaction_events()           → "What led up to a specific reset?"
 ```
 
 ## Reference

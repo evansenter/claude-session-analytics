@@ -22,6 +22,7 @@ from session_analytics.patterns import (
     sample_sequences,
 )
 from session_analytics.queries import (
+    analyze_pre_compaction_patterns,
     classify_sessions,
     detect_parallel_sessions,
     find_related_sessions,
@@ -652,6 +653,78 @@ def _format_compactions(data: dict) -> list[str]:
     return lines
 
 
+# Issue #81: Aggregate compactions formatter
+@_register_formatter(
+    lambda d: d.get("aggregate") is True and "sessions" in d and "total_compaction_count" in d
+)
+def _format_compactions_aggregate(data: dict) -> list[str]:
+    total_compactions = data.get("total_compaction_count", 0)
+    total_sessions = data.get("total_sessions_with_compactions", 0)
+    shown_sessions = data.get("session_count", 0)
+
+    lines = [
+        f"Compaction summary by session - last {data.get('days', 7)} days",
+        "",
+        f"Total compactions: {total_compactions}",
+        f"Sessions with compactions: {total_sessions}",
+    ]
+
+    if total_sessions > shown_sessions:
+        lines.append(f"Showing {shown_sessions} of {total_sessions} sessions")
+    lines.append("")
+
+    if data.get("sessions"):
+        lines.append("Sessions ranked by compaction count:")
+        for s in data["sessions"][:15]:
+            lines.append(
+                f"  {s['session_id'][:8]}... - {s['compaction_count']} compactions "
+                f"({s['total_summary_kb']:.0f}KB summaries)"
+            )
+    return lines
+
+
+# Issue #81: Pre-compaction patterns formatter
+@_register_formatter(lambda d: "compactions_analyzed" in d and "patterns" in d)
+def _format_pre_compaction_patterns(data: dict) -> list[str]:
+    lines = [
+        f"Pre-compaction pattern analysis - last {data.get('days', 7)} days",
+        "",
+        f"Compactions analyzed: {data.get('compactions_analyzed', 0)}",
+        f"Events analyzed before each: {data.get('events_before', 50)}",
+        "",
+    ]
+
+    patterns = data.get("patterns", {})
+    if patterns:
+        lines.append("Detected patterns:")
+        lines.append(f"  Avg consecutive reads: {patterns.get('avg_consecutive_reads', 0):.1f}")
+        lines.append(f"  Avg files re-read: {patterns.get('avg_files_read_multiple_times', 0):.1f}")
+        lines.append(f"  Avg large results (>10KB): {patterns.get('avg_large_results', 0):.1f}")
+        lines.append("")
+
+        if patterns.get("tool_distribution"):
+            lines.append("Tool distribution before compactions:")
+            for t in patterns["tool_distribution"][:5]:
+                lines.append(f"  {t['tool']}: {t['count']}")
+            lines.append("")
+
+        if patterns.get("top_reread_files"):
+            lines.append("Most frequently re-read files:")
+            for f in patterns["top_reread_files"][:5]:
+                lines.append(f"  {f['file']}: {f['read_count']}x")
+            lines.append("")
+
+    recommendations = data.get("recommendations", [])
+    if recommendations:
+        lines.append("Recommendations:")
+        for r in recommendations:
+            lines.append(f"  - {r}")
+    elif data.get("compactions_analyzed", 0) > 0:
+        lines.append("No antipatterns detected - context efficiency looks healthy.")
+
+    return lines
+
+
 @_register_formatter(lambda d: "compaction_timestamp" in d and "events" in d and "event_count" in d)
 def _format_pre_compaction(data: dict) -> list[str]:
     lines = [
@@ -1163,6 +1236,7 @@ def cmd_compactions(args):
         days=args.days,
         session_id=getattr(args, "session_id", None),
         limit=getattr(args, "limit", 50),
+        aggregate=getattr(args, "aggregate", False),
     )
     print(format_output(result, args.json))
 
@@ -1174,6 +1248,18 @@ def cmd_pre_compaction(args):
         storage,
         session_id=args.session_id,
         compaction_timestamp=args.timestamp,
+        limit=args.limit,
+    )
+    print(format_output(result, args.json))
+
+
+def cmd_pre_compaction_patterns(args):
+    """Analyze patterns in events leading up to compactions."""
+    storage = SQLiteStorage()
+    result = analyze_pre_compaction_patterns(
+        storage,
+        days=args.days,
+        events_before=args.events_before,
         limit=args.limit,
     )
     print(format_output(result, args.json))
@@ -1269,6 +1355,9 @@ def cmd_benchmark(args):
     )
     from session_analytics.patterns import (
         sample_sequences as patterns_sample_sequences,
+    )
+    from session_analytics.queries import (
+        analyze_pre_compaction_patterns as queries_analyze_pre_compaction_patterns,
     )
     from session_analytics.queries import (
         classify_sessions as queries_classify_sessions,
@@ -1373,10 +1462,17 @@ def cmd_benchmark(args):
         "get_bus_events": lambda: queries_query_bus_events(storage, days=7, limit=10),
         # Issue #69: Compaction and efficiency tools
         "get_compaction_events": lambda: queries_get_compaction_events(storage, days=7),
+        "get_compaction_events_agg": lambda: queries_get_compaction_events(
+            storage, days=7, aggregate=True
+        ),
         "get_large_tool_results": lambda: queries_get_large_tool_results(
             storage, days=7, min_size_kb=10, limit=10
         ),
         "get_session_efficiency": lambda: queries_get_session_efficiency(storage, days=7),
+        # Issue #81: Pre-compaction pattern analysis
+        "analyze_pre_compaction_patterns": lambda: queries_analyze_pre_compaction_patterns(
+            storage, days=7
+        ),
     }
 
     # Skipped tools (require specific data or modify DB):
@@ -1682,6 +1778,9 @@ Data location: ~/.claude/contrib/analytics/data.db
     sub.add_argument("--days", type=int, default=7, help="Days to analyze (default: 7)")
     sub.add_argument("--session-id", help="Filter to specific session ID")
     sub.add_argument("--limit", type=int, default=50, help="Max events to return (default: 50)")
+    sub.add_argument(
+        "--aggregate", action="store_true", help="Group by session instead of individual events"
+    )
     sub.set_defaults(func=cmd_compactions)
 
     # pre-compaction
@@ -1690,6 +1789,22 @@ Data location: ~/.claude/contrib/analytics/data.db
     sub.add_argument("timestamp", help="ISO timestamp of the compaction event")
     sub.add_argument("--limit", type=int, default=50, help="Max events to return (default: 50)")
     sub.set_defaults(func=cmd_pre_compaction)
+
+    # pre-compaction-patterns (Issue #81)
+    sub = subparsers.add_parser(
+        "pre-compaction-patterns", help="Analyze patterns in events before compactions"
+    )
+    sub.add_argument("--days", type=int, default=7, help="Days to analyze (default: 7)")
+    sub.add_argument(
+        "--events-before",
+        type=int,
+        default=50,
+        help="Events to analyze before each compaction (default: 50)",
+    )
+    sub.add_argument(
+        "--limit", type=int, default=20, help="Max compactions to analyze (default: 20)"
+    )
+    sub.set_defaults(func=cmd_pre_compaction_patterns)
 
     # large-results
     sub = subparsers.add_parser(

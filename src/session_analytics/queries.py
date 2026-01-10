@@ -2099,6 +2099,7 @@ def get_compaction_events(
     days: int = 7,
     session_id: str | None = None,
     limit: int = 50,
+    aggregate: bool = False,
 ) -> dict:
     """List compaction events where conversation history was truncated.
 
@@ -2110,9 +2111,10 @@ def get_compaction_events(
         days: Number of days to analyze (default: 7)
         session_id: Optional filter for specific session
         limit: Maximum events to return (default: 50)
+        aggregate: If True, group by session with counts instead of individual events
 
     Returns:
-        Dict with compaction events and their timestamps
+        Dict with compaction events and their timestamps (or session aggregates if aggregate=True)
     """
     cutoff = get_cutoff(days=days)
 
@@ -2132,7 +2134,63 @@ def get_compaction_events(
     )
     total_count = count_row[0]["total"] if count_row else 0
 
-    # Then get limited results
+    # Issue #81: Aggregate mode groups by session
+    if aggregate:
+        query_params = list(params)
+        limit_clause = ""
+        if limit > 0:
+            limit_clause = "LIMIT ?"
+            query_params.append(limit)
+
+        rows = storage.execute_query(
+            f"""
+            SELECT
+                session_id,
+                project_path,
+                COUNT(*) as compaction_count,
+                MIN(timestamp) as first_compaction,
+                MAX(timestamp) as last_compaction,
+                SUM(result_size_bytes) as total_summary_bytes
+            FROM events
+            WHERE {where_clause}
+            GROUP BY session_id
+            ORDER BY compaction_count DESC
+            {limit_clause}
+            """,
+            tuple(query_params),
+        )
+
+        sessions = [
+            {
+                "session_id": row["session_id"],
+                "project": row["project_path"],
+                "compaction_count": row["compaction_count"],
+                "first_compaction": _format_timestamp(row["first_compaction"]),
+                "last_compaction": _format_timestamp(row["last_compaction"]),
+                "total_summary_kb": round((row["total_summary_bytes"] or 0) / 1024, 1),
+            }
+            for row in rows
+        ]
+
+        # Count unique sessions
+        session_count_row = storage.execute_query(
+            f"SELECT COUNT(DISTINCT session_id) as count FROM events WHERE {where_clause}",
+            tuple(params),
+        )
+        total_sessions = session_count_row[0]["count"] if session_count_row else 0
+
+        return {
+            "days": days,
+            "session_id": session_id,
+            "limit": limit,
+            "aggregate": True,
+            "total_compaction_count": total_count,
+            "total_sessions_with_compactions": total_sessions,
+            "session_count": len(sessions),
+            "sessions": sessions,
+        }
+
+    # Non-aggregate mode: return individual compaction events
     query_params = list(params)
     limit_clause = ""
     if limit > 0:
@@ -2170,6 +2228,7 @@ def get_compaction_events(
         "days": days,
         "session_id": session_id,
         "limit": limit,
+        "aggregate": False,
         "total_compaction_count": total_count,
         "compaction_count": len(compactions),
         "compactions": compactions,
@@ -2237,6 +2296,197 @@ def get_pre_compaction_events(
         "compaction_timestamp": compaction_timestamp,
         "event_count": len(events),
         "events": events,
+    }
+
+
+def analyze_pre_compaction_patterns(
+    storage: SQLiteStorage,
+    days: int = 7,
+    events_before: int = 50,
+    limit: int = 20,
+) -> dict:
+    """Analyze patterns in events leading up to compactions.
+
+    RFC #81: Identifies antipatterns that accelerate context exhaustion:
+    - Consecutive reads without edits (exploration without action)
+    - Files read multiple times before compaction
+    - Large tool results that bloated context
+    - Tool distribution before compaction
+
+    Args:
+        storage: Storage instance
+        days: Number of days to analyze (default: 7)
+        events_before: Events to analyze before each compaction (default: 50)
+        limit: Max compactions to analyze (default: 20)
+
+    Returns:
+        Dict with aggregated patterns across analyzed compactions
+    """
+    cutoff = get_cutoff(days=days)
+
+    # Get recent compactions
+    compactions = storage.execute_query(
+        """
+        SELECT session_id, timestamp
+        FROM events
+        WHERE timestamp >= ?
+          AND entry_type = 'compaction'
+        ORDER BY timestamp DESC
+        LIMIT ?
+        """,
+        (cutoff, limit),
+    )
+
+    if not compactions:
+        return {
+            "days": days,
+            "compactions_analyzed": 0,
+            "patterns": {},
+            "recommendations": [],
+        }
+
+    # Analyze patterns across all compactions
+    total_consecutive_reads = 0
+    total_files_read_multiple = 0
+    total_large_results = 0
+    tool_counts: dict[str, int] = {}
+    file_read_counts: dict[str, int] = {}
+    large_results_by_tool: dict[str, int] = {}
+
+    for compaction in compactions:
+        session_id = compaction["session_id"]
+        compact_time = compaction["timestamp"]
+
+        # Get events before this compaction
+        events = storage.execute_query(
+            """
+            SELECT
+                entry_type,
+                tool_name,
+                file_path,
+                result_size_bytes
+            FROM events
+            WHERE session_id = ?
+              AND timestamp < ?
+            ORDER BY timestamp DESC
+            LIMIT ?
+            """,
+            (session_id, compact_time, events_before),
+        )
+
+        # Count consecutive reads (no edit between reads)
+        consecutive_reads = 0
+        max_consecutive_reads = 0
+        for event in events:
+            if event["tool_name"] == "Read":
+                consecutive_reads += 1
+                max_consecutive_reads = max(max_consecutive_reads, consecutive_reads)
+            elif event["tool_name"] == "Edit":
+                consecutive_reads = 0
+        total_consecutive_reads += max_consecutive_reads
+
+        # Count files read multiple times
+        session_file_counts: dict[str, int] = {}
+        for event in events:
+            if event["tool_name"] == "Read" and event["file_path"]:
+                session_file_counts[event["file_path"]] = (
+                    session_file_counts.get(event["file_path"], 0) + 1
+                )
+        multi_read_files = sum(1 for c in session_file_counts.values() if c > 1)
+        total_files_read_multiple += multi_read_files
+
+        # Aggregate file reads across all compactions
+        for f, c in session_file_counts.items():
+            file_read_counts[f] = file_read_counts.get(f, 0) + c
+
+        # Count large results (>10KB)
+        for event in events:
+            size = event["result_size_bytes"] or 0
+            if size > 10240:
+                total_large_results += 1
+                tool = event["tool_name"] or "unknown"
+                large_results_by_tool[tool] = large_results_by_tool.get(tool, 0) + 1
+
+        # Tool distribution
+        for event in events:
+            if event["tool_name"]:
+                tool_counts[event["tool_name"]] = tool_counts.get(event["tool_name"], 0) + 1
+
+    # Calculate averages
+    compactions_analyzed = len(compactions)
+    avg_consecutive_reads = total_consecutive_reads / compactions_analyzed
+    avg_files_read_multiple = total_files_read_multiple / compactions_analyzed
+    avg_large_results = total_large_results / compactions_analyzed
+
+    # Top files read multiple times
+    top_reread_files = sorted(
+        [(f, c) for f, c in file_read_counts.items() if c > 1],
+        key=lambda x: x[1],
+        reverse=True,
+    )[:10]
+
+    # Tool distribution sorted by count
+    tool_distribution = sorted(
+        tool_counts.items(),
+        key=lambda x: x[1],
+        reverse=True,
+    )
+
+    # Generate recommendations based on findings
+    recommendations = []
+    if avg_consecutive_reads > 5:
+        recommendations.append(
+            f"High consecutive reads ({avg_consecutive_reads:.1f} avg) - "
+            "consider reading fewer files or using grep to target specific content"
+        )
+    if avg_files_read_multiple > 2:
+        recommendations.append(
+            f"Files re-read frequently ({avg_files_read_multiple:.1f} avg) - "
+            "consider keeping file content in context or summarizing key sections"
+        )
+    if avg_large_results > 3:
+        recommendations.append(
+            f"Many large tool results ({avg_large_results:.1f} avg) - "
+            "use offset/limit parameters or grep to reduce result size"
+        )
+
+    # Check for Read-heavy tool distribution
+    read_count = tool_counts.get("Read", 0)
+    edit_count = tool_counts.get("Edit", 0)
+    if edit_count == 0 and read_count > 10:
+        # All reads, no edits - pure exploration that consumed context
+        recommendations.append(
+            f"Pure exploration pattern ({read_count} reads, 0 edits) - "
+            "context consumed without productive editing"
+        )
+    elif read_count > 0 and edit_count > 0:
+        read_edit_ratio = read_count / edit_count
+        if read_edit_ratio > 5:
+            recommendations.append(
+                f"High read:edit ratio ({read_edit_ratio:.1f}:1) - "
+                "may indicate over-exploration before action"
+            )
+
+    return {
+        "days": days,
+        "events_before": events_before,
+        "compactions_analyzed": compactions_analyzed,
+        "patterns": {
+            "avg_consecutive_reads": round(avg_consecutive_reads, 1),
+            "avg_files_read_multiple_times": round(avg_files_read_multiple, 1),
+            "avg_large_results": round(avg_large_results, 1),
+            "tool_distribution": [
+                {"tool": tool, "count": count} for tool, count in tool_distribution
+            ],
+            "top_reread_files": [{"file": f, "read_count": c} for f, c in top_reread_files],
+            "large_results_by_tool": [
+                {"tool": tool, "count": count}
+                for tool, count in sorted(
+                    large_results_by_tool.items(), key=lambda x: x[1], reverse=True
+                )
+            ],
+        },
+        "recommendations": recommendations,
     }
 
 
