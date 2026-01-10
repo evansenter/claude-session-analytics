@@ -462,6 +462,121 @@ class TestSampleSequences:
             tools = [e["tool"] for e in matched_events]
             assert tools == ["Read", "Edit"]
 
+    def test_sample_sequences_expand_matches_commands(self, storage):
+        """Test that expand=True matches Bash command names instead of 'Bash'."""
+        now = datetime.now()
+
+        events = [
+            Event(
+                id=None,
+                uuid="exp-1",
+                timestamp=now - timedelta(hours=1),
+                session_id="s1",
+                project_path="-test",
+                entry_type="tool_use",
+                tool_name="Bash",
+                command="git",
+            ),
+            Event(
+                id=None,
+                uuid="exp-2",
+                timestamp=now - timedelta(hours=1, minutes=-1),
+                session_id="s1",
+                project_path="-test",
+                entry_type="tool_use",
+                tool_name="Edit",
+            ),
+        ]
+        storage.add_events_batch(events)
+
+        # Without expand, "git → Edit" should NOT match (tool_name is "Bash")
+        result_unexpanded = sample_sequences(storage, pattern="git → Edit", expand=False, days=7)
+        assert result_unexpanded["total_occurrences"] == 0
+        assert result_unexpanded["expanded"] is False
+
+        # With expand, "git → Edit" SHOULD match
+        result_expanded = sample_sequences(storage, pattern="git → Edit", expand=True, days=7)
+        assert result_expanded["total_occurrences"] == 1
+        assert result_expanded["expanded"] is True
+        # Verify the sample includes base_tool for the expanded event
+        sample_events = result_expanded["samples"][0]["events"]
+        git_event = next(e for e in sample_events if e.get("tool") == "git")
+        assert git_event.get("base_tool") == "Bash"
+
+    def test_sample_sequences_expand_matches_skill_names(self, storage):
+        """Test that expand=True matches Skill names."""
+        now = datetime.now()
+
+        events = [
+            Event(
+                id=None,
+                uuid="skill-1",
+                timestamp=now - timedelta(hours=1),
+                session_id="s1",
+                project_path="-test",
+                entry_type="tool_use",
+                tool_name="Skill",
+                skill_name="commit",
+            ),
+            Event(
+                id=None,
+                uuid="skill-2",
+                timestamp=now - timedelta(hours=1, minutes=-1),
+                session_id="s1",
+                project_path="-test",
+                entry_type="tool_use",
+                tool_name="Read",
+            ),
+        ]
+        storage.add_events_batch(events)
+
+        # With expand, "commit → Read" should match
+        result = sample_sequences(storage, pattern="commit → Read", expand=True, days=7)
+        assert result["total_occurrences"] == 1
+        assert result["expanded"] is True
+
+    def test_sample_sequences_expand_matches_task_subagent(self, storage):
+        """Test that expand=True matches Task subagent_type."""
+        import json
+
+        now = datetime.now()
+
+        events = [
+            Event(
+                id=None,
+                uuid="task-1",
+                timestamp=now - timedelta(hours=1),
+                session_id="s1",
+                project_path="-test",
+                entry_type="tool_use",
+                tool_name="Task",
+                tool_input_json=json.dumps({"subagent_type": "Explore"}),
+            ),
+            Event(
+                id=None,
+                uuid="task-2",
+                timestamp=now - timedelta(hours=1, minutes=-1),
+                session_id="s1",
+                project_path="-test",
+                entry_type="tool_use",
+                tool_name="Read",
+            ),
+        ]
+        storage.add_events_batch(events)
+
+        # With expand, "Explore → Read" should match
+        result = sample_sequences(storage, pattern="Explore → Read", expand=True, days=7)
+        assert result["total_occurrences"] == 1
+        assert result["expanded"] is True
+
+    def test_sample_sequences_expand_allows_hyphenated_names(self, storage):
+        """Test that expanded patterns with hyphens are valid."""
+        result = sample_sequences(storage, pattern="pr-review → Edit", expand=True, days=7)
+        # Should not error - pattern is valid
+        assert "error" not in result or "Invalid tool name" not in result.get("error", "")
+        assert result["parsed_tools"] == ["pr-review", "Edit"]
+        assert result["expanded"] is True
+
 
 class TestAnalyzeFailures:
     """Tests for the analyze_failures function (Phase 4: Failure Analysis)."""

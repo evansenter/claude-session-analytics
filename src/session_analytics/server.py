@@ -247,7 +247,13 @@ def get_tool_sequences(
 
 
 @mcp.tool()
-def sample_sequences(pattern: str, limit: int = 5, context_events: int = 2, days: int = 7) -> dict:
+def sample_sequences(
+    pattern: str,
+    limit: int = 5,
+    context_events: int = 2,
+    days: int = 7,
+    expand: bool = False,
+) -> dict:
     """Get random samples of a sequence pattern with surrounding context.
 
     Instead of just counting "Read → Edit" occurrences, returns actual examples
@@ -258,15 +264,21 @@ def sample_sequences(pattern: str, limit: int = 5, context_events: int = 2, days
         limit: Number of random samples to return (default: 5)
         context_events: Number of events before/after to include (default: 2)
         days: Number of days to analyze (default: 7)
+        expand: If True, match expanded tool names (Bash→command, Skill→skill_name,
+                Task→subagent_type). Use with patterns from get_tool_sequences(expand=True).
 
     Returns:
         Pattern info, total occurrences, and sampled instances with context
     """
     queries.ensure_fresh_data(storage, days=days)
-    result = patterns.sample_sequences(
-        storage, pattern=pattern, count=limit, context_events=context_events, days=days
+    return patterns.sample_sequences(
+        storage,
+        pattern=pattern,
+        count=limit,
+        context_events=context_events,
+        days=days,
+        expand=expand,
     )
-    return {"status": "ok", **result}
 
 
 @mcp.tool()

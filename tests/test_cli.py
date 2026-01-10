@@ -504,6 +504,7 @@ class TestCliCommands:
             limit = 5
             context = 2
             days = 7
+            expand = False
 
         with patch("session_analytics.cli.SQLiteStorage", return_value=populated_storage):
             cmd_sample_sequences(Args())

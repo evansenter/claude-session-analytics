@@ -151,6 +151,21 @@ def test_sample_sequences():
     assert "total_occurrences" in result
     assert "samples" in result
     assert isinstance(result["samples"], list)
+    assert "expanded" in result
+    assert result["expanded"] is False
+
+
+def test_sample_sequences_expand():
+    """Test that sample_sequences respects expand parameter."""
+    # Test with expand=True - should return expanded field set to True
+    result = sample_sequences.fn(
+        pattern="git → Edit", limit=5, context_events=2, days=7, expand=True
+    )
+    assert result["status"] == "ok"
+    assert result["expanded"] is True
+    # Pattern may or may not match, but structure should be correct
+    assert "parsed_tools" in result
+    assert result["parsed_tools"] == ["git", "Edit"]
 
 
 def test_get_session_messages():

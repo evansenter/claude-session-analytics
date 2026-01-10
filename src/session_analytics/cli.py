@@ -990,6 +990,7 @@ def cmd_sample_sequences(args):
         count=args.limit,
         context_events=args.context,
         days=args.days,
+        expand=args.expand,
     )
     print(format_output(result, args.json))
 
@@ -1605,6 +1606,11 @@ Data location: ~/.claude/contrib/analytics/data.db
     sub.add_argument("--limit", type=int, default=5, help="Number of samples (default: 5)")
     sub.add_argument(
         "--context", type=int, default=2, help="Context events before/after (default: 2)"
+    )
+    sub.add_argument(
+        "--expand",
+        action="store_true",
+        help="Match expanded tool names (Bash→command, Skill→skill_name, Task→subagent_type)",
     )
     sub.set_defaults(func=cmd_sample_sequences)
 

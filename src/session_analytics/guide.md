@@ -36,10 +36,17 @@ identify permission gaps.
 
 | Tool | Purpose |
 |------|---------|
-| `get_tool_sequences(days?, min_count?, length?, limit?)` | Common tool chains (e.g., Read → Edit → Bash) |
-| `sample_sequences(pattern, limit?, context_events?)` | Random samples of a pattern with surrounding context |
+| `get_tool_sequences(days?, min_count?, length?, limit?, expand?)` | Common tool chains (e.g., Read → Edit → Bash) |
+| `sample_sequences(pattern, limit?, context_events?, expand?)` | Random samples of a pattern with surrounding context |
 | `get_permission_gaps(days?, min_count?)` | Commands not covered by settings.json (supports glob patterns) |
 | `get_insights(days?, refresh?)` | Pre-computed patterns for /improve-workflow |
+
+**expand**: When `True`, expands tool names to specific variants:
+- Bash → specific command (e.g., "git", "make")
+- Skill → skill name (e.g., "commit", "pr-review")
+- Task → subagent type (e.g., "Explore", "Plan")
+
+Use `get_tool_sequences(expand=True)` to discover expanded patterns, then `sample_sequences(pattern, expand=True)` to get examples.
 
 ### Failure Analysis
 

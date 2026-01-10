@@ -17,6 +17,38 @@ logger = logging.getLogger("session-analytics")
 DEFAULT_SETTINGS_PATH = Path.home() / ".claude" / "settings.json"
 
 
+def _get_effective_name(row: dict, expand: bool) -> str:
+    """Get the effective name for a tool, optionally expanded.
+
+    Args:
+        row: Database row with tool_name, command, skill_name, tool_input_json
+        expand: If True, expand Bash→command, Skill→skill_name, Task→subagent_type
+
+    Returns:
+        Effective tool name (expanded or base depending on expand flag)
+    """
+    if not expand:
+        return row["tool_name"]
+
+    tool = row["tool_name"]
+    if tool == "Bash" and row["command"]:
+        return row["command"]
+    elif tool == "Skill" and row["skill_name"]:
+        return row["skill_name"]
+    elif tool == "Task" and row["tool_input_json"]:
+        try:
+            input_data = json.loads(row["tool_input_json"])
+            if subagent := input_data.get("subagent_type"):
+                return subagent
+        except (json.JSONDecodeError, TypeError) as e:
+            logger.debug(
+                "Failed to parse tool_input_json for Task event %s: %s",
+                row.get("id", "unknown"),
+                e,
+            )
+    return tool
+
+
 def compute_tool_frequency_patterns(
     storage: SQLiteStorage,
     days: int = 7,
@@ -140,25 +172,6 @@ def compute_sequence_patterns(
         (cutoff,),
     )
 
-    def get_effective_name(row) -> str:
-        """Get the effective name for a tool, optionally expanded."""
-        if not expand:
-            return row["tool_name"]
-
-        tool = row["tool_name"]
-        if tool == "Bash" and row["command"]:
-            return row["command"]
-        elif tool == "Skill" and row["skill_name"]:
-            return row["skill_name"]
-        elif tool == "Task" and row["tool_input_json"]:
-            try:
-                input_data = json.loads(row["tool_input_json"])
-                if subagent := input_data.get("subagent_type"):
-                    return subagent
-            except (json.JSONDecodeError, TypeError):
-                pass
-        return tool
-
     # Group by session and extract sequences
     sequences: Counter = Counter()
     current_session = None
@@ -175,7 +188,7 @@ def compute_sequence_patterns(
             current_session = row["session_id"]
             session_tools = []
 
-        session_tools.append(get_effective_name(row))
+        session_tools.append(_get_effective_name(row, expand))
 
     # Process last session
     if len(session_tools) >= sequence_length:
@@ -209,6 +222,7 @@ def sample_sequences(
     count: int = 5,
     context_events: int = 2,
     days: int = 7,
+    expand: bool = False,
 ) -> dict:
     """Return random samples of a sequence pattern with surrounding context.
 
@@ -221,6 +235,8 @@ def sample_sequences(
         count: Number of random samples to return (default: 5)
         context_events: Number of events before/after to include (default: 2)
         days: Number of days to analyze
+        expand: If True, match expanded tool names (Bash→command, Skill→skill_name,
+                Task→subagent_type). Use with patterns from get_tool_sequences(expand=True).
 
     Returns:
         Dict with pattern info, total occurrences, and sampled instances
@@ -230,7 +246,9 @@ def sample_sequences(
     # Validate pattern input
     if len(pattern) > 500:
         return {
+            "status": "ok",
             "pattern": pattern[:50] + "...",
+            "expanded": expand,
             "error": "Pattern too long (max 500 characters)",
             "total_occurrences": 0,
             "samples": [],
@@ -242,12 +260,14 @@ def sample_sequences(
     else:
         target_tools = [t.strip() for t in pattern.split(",")]
 
-    # Validate individual tool names (alphanumeric and underscores only)
+    # Validate individual tool names (alphanumeric, underscores, and hyphens for expanded names)
     for tool in target_tools:
-        if not tool or not all(c.isalnum() or c == "_" for c in tool):
+        if not tool or not all(c.isalnum() or c in "_-" for c in tool):
             return {
+                "status": "ok",
                 "pattern": pattern,
-                "error": f"Invalid tool name: '{tool}' (must be alphanumeric or underscores)",
+                "expanded": expand,
+                "error": f"Invalid tool name: '{tool}' (must be alphanumeric, underscores, or hyphens)",
                 "total_occurrences": 0,
                 "samples": [],
             }
@@ -255,16 +275,20 @@ def sample_sequences(
     sequence_length = len(target_tools)
     if sequence_length < 2:
         return {
+            "status": "ok",
             "pattern": pattern,
+            "expanded": expand,
             "error": "Pattern must contain at least 2 tools",
             "total_occurrences": 0,
             "samples": [],
         }
 
     # Get all tool events ordered by session and timestamp
+    # Include extra columns needed for expansion
     rows = storage.execute_query(
         """
-        SELECT id, session_id, tool_name, timestamp, project_path, file_path, command
+        SELECT id, session_id, tool_name, timestamp, project_path, file_path,
+               command, skill_name, tool_input_json
         FROM events
         WHERE timestamp >= ? AND tool_name IS NOT NULL
         ORDER BY session_id, timestamp
@@ -282,7 +306,9 @@ def sample_sequences(
             # Process previous session to find pattern matches
             if len(session_events) >= sequence_length:
                 for i in range(len(session_events) - sequence_length + 1):
-                    tools = [session_events[j]["tool_name"] for j in range(i, i + sequence_length)]
+                    tools = [
+                        session_events[j]["effective_name"] for j in range(i, i + sequence_length)
+                    ]
                     if tools == target_tools:
                         # Calculate context boundaries
                         start_ctx = max(0, i - context_events)
@@ -305,6 +331,7 @@ def sample_sequences(
             {
                 "id": row["id"],
                 "tool_name": row["tool_name"],
+                "effective_name": _get_effective_name(row, expand),
                 "timestamp": row["timestamp"],
                 "project_path": row["project_path"],
                 "file_path": row["file_path"],
@@ -315,7 +342,7 @@ def sample_sequences(
     # Process last session
     if len(session_events) >= sequence_length:
         for i in range(len(session_events) - sequence_length + 1):
-            tools = [session_events[j]["tool_name"] for j in range(i, i + sequence_length)]
+            tools = [session_events[j]["effective_name"] for j in range(i, i + sequence_length)]
             if tools == target_tools:
                 start_ctx = max(0, i - context_events)
                 end_ctx = min(len(session_events), i + sequence_length + context_events)
@@ -347,10 +374,13 @@ def sample_sequences(
         formatted_events = []
         for idx, evt in enumerate(events):
             formatted_evt = {
-                "tool": evt["tool_name"],
+                "tool": evt["effective_name"] if expand else evt["tool_name"],
                 "timestamp": evt["timestamp"].isoformat() if evt["timestamp"] else None,
                 "is_match": match_start <= idx < match_end,
             }
+            # When expanded, also show base tool for context
+            if expand and evt["effective_name"] != evt["tool_name"]:
+                formatted_evt["base_tool"] = evt["tool_name"]
             if evt["file_path"]:
                 formatted_evt["file"] = evt["file_path"]
             if evt["command"]:
@@ -372,7 +402,9 @@ def sample_sequences(
         )
 
     return {
+        "status": "ok",
         "pattern": pattern,
+        "expanded": expand,
         "parsed_tools": target_tools,
         "total_occurrences": total_occurrences,
         "sample_count": len(formatted_samples),
