@@ -2,6 +2,7 @@
 
 from session_analytics.server import (
     analyze_failures,
+    analyze_pre_compaction_patterns,
     analyze_trends,
     classify_sessions,
     correlate_git_with_sessions,
@@ -364,3 +365,44 @@ def test_classify_sessions_efficiency():
         assert "files_read_multiple_times" in efficiency
         assert "burn_rate" in efficiency
         assert efficiency["burn_rate"] in ["high", "medium", "low"]
+
+
+# Issue #81: Compaction aggregation and pre-compaction patterns
+
+
+def test_get_compaction_events_aggregate():
+    """Test that get_compaction_events aggregate mode returns session-level data."""
+    result = get_compaction_events.fn(days=7, limit=10, aggregate=True)
+    assert result["status"] == "ok"
+    assert result["aggregate"] is True
+    assert "total_compaction_count" in result
+    assert "total_sessions_with_compactions" in result
+    assert "session_count" in result
+    assert "sessions" in result
+    assert isinstance(result["sessions"], list)
+    # If sessions exist, verify structure
+    if result["sessions"]:
+        session = result["sessions"][0]
+        assert "session_id" in session
+        assert "compaction_count" in session
+        assert "first_compaction" in session
+        assert "last_compaction" in session
+        assert "total_summary_kb" in session
+
+
+def test_analyze_pre_compaction_patterns():
+    """Test that analyze_pre_compaction_patterns returns pattern data."""
+    result = analyze_pre_compaction_patterns.fn(days=7, events_before=50, limit=20)
+    assert result["status"] == "ok"
+    assert "compactions_analyzed" in result
+    assert "patterns" in result
+    assert "recommendations" in result
+    assert isinstance(result["recommendations"], list)
+    # If patterns exist, verify structure
+    if result.get("compactions_analyzed", 0) > 0:
+        patterns = result["patterns"]
+        assert "avg_consecutive_reads" in patterns
+        assert "avg_files_read_multiple_times" in patterns
+        assert "avg_large_results" in patterns
+        assert "tool_distribution" in patterns
+        assert isinstance(patterns["tool_distribution"], list)

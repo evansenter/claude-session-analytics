@@ -2402,6 +2402,62 @@ class TestGetCompactionEvents:
         assert result["compaction_count"] == 1
         assert result["compactions"][0]["session_id"] == "s1"
 
+    def test_aggregate_mode_groups_by_session(self, storage):
+        """Test that aggregate=True groups compactions by session."""
+        from session_analytics.queries import get_compaction_events
+
+        now = datetime.now()
+        events = [
+            # Session 1: 3 compactions
+            Event(
+                id=None,
+                uuid="c1",
+                timestamp=now - timedelta(hours=1),
+                session_id="s1",
+                entry_type="compaction",
+                result_size_bytes=1024,
+            ),
+            Event(
+                id=None,
+                uuid="c2",
+                timestamp=now - timedelta(hours=2),
+                session_id="s1",
+                entry_type="compaction",
+                result_size_bytes=2048,
+            ),
+            Event(
+                id=None,
+                uuid="c3",
+                timestamp=now - timedelta(hours=3),
+                session_id="s1",
+                entry_type="compaction",
+                result_size_bytes=1024,
+            ),
+            # Session 2: 1 compaction
+            Event(
+                id=None,
+                uuid="c4",
+                timestamp=now - timedelta(hours=1),
+                session_id="s2",
+                entry_type="compaction",
+                result_size_bytes=512,
+            ),
+        ]
+        storage.add_events_batch(events)
+
+        result = get_compaction_events(storage, days=7, aggregate=True)
+
+        assert result["aggregate"] is True
+        assert result["total_compaction_count"] == 4
+        assert result["total_sessions_with_compactions"] == 2
+        assert result["session_count"] == 2
+        assert len(result["sessions"]) == 2
+        # Sessions sorted by compaction count descending
+        assert result["sessions"][0]["session_id"] == "s1"
+        assert result["sessions"][0]["compaction_count"] == 3
+        assert result["sessions"][1]["session_id"] == "s2"
+        assert result["sessions"][1]["compaction_count"] == 1
+
 
 class TestGetPreCompactionEvents:
     """Tests for get_pre_compaction_events()."""
@@ -2528,6 +2584,134 @@ class TestGetPreCompactionEvents:
 
         assert result["event_count"] == 3
         assert len(result["events"]) == 3
+
+
+class TestAnalyzePreCompactionPatterns:
+    """Tests for analyze_pre_compaction_patterns()."""
+
+    def test_returns_empty_when_no_compactions(self, storage):
+        """Test that empty result is returned when no compactions exist."""
+        from session_analytics.queries import analyze_pre_compaction_patterns
+
+        result = analyze_pre_compaction_patterns(storage, days=7)
+
+        assert result["compactions_analyzed"] == 0
+        assert result["patterns"] == {}
+        assert result["recommendations"] == []
+
+    def test_detects_consecutive_reads(self, storage):
+        """Test that consecutive reads are detected as a pattern."""
+        from session_analytics.queries import analyze_pre_compaction_patterns
+
+        now = datetime.now()
+        compaction_time = now - timedelta(hours=1)
+        events = [
+            # Compaction event
+            Event(
+                id=None,
+                uuid="c1",
+                timestamp=compaction_time,
+                session_id="s1",
+                entry_type="compaction",
+            ),
+            # 10 consecutive reads before compaction (no edits)
+            *[
+                Event(
+                    id=None,
+                    uuid=f"r{i}",
+                    timestamp=compaction_time - timedelta(minutes=i + 1),
+                    session_id="s1",
+                    entry_type="tool_use",
+                    tool_name="Read",
+                    file_path=f"/test/file{i}.py",
+                )
+                for i in range(10)
+            ],
+        ]
+        storage.add_events_batch(events)
+
+        result = analyze_pre_compaction_patterns(storage, days=7)
+
+        assert result["compactions_analyzed"] == 1
+        assert result["patterns"]["avg_consecutive_reads"] >= 10
+        assert "tool_distribution" in result["patterns"]
+
+    def test_detects_files_read_multiple_times(self, storage):
+        """Test that files read multiple times are detected."""
+        from session_analytics.queries import analyze_pre_compaction_patterns
+
+        now = datetime.now()
+        compaction_time = now - timedelta(hours=1)
+        events = [
+            # Compaction event
+            Event(
+                id=None,
+                uuid="c1",
+                timestamp=compaction_time,
+                session_id="s1",
+                entry_type="compaction",
+            ),
+            # Same file read 5 times
+            *[
+                Event(
+                    id=None,
+                    uuid=f"r{i}",
+                    timestamp=compaction_time - timedelta(minutes=i + 1),
+                    session_id="s1",
+                    entry_type="tool_use",
+                    tool_name="Read",
+                    file_path="/test/same_file.py",
+                )
+                for i in range(5)
+            ],
+        ]
+        storage.add_events_batch(events)
+
+        result = analyze_pre_compaction_patterns(storage, days=7)
+
+        assert result["compactions_analyzed"] == 1
+        assert result["patterns"]["avg_files_read_multiple_times"] >= 1
+        # Check that the re-read file appears in top_reread_files
+        reread_files = [f["file"] for f in result["patterns"]["top_reread_files"]]
+        assert "/test/same_file.py" in reread_files
+
+    def test_generates_recommendations_for_antipatterns(self, storage):
+        """Test that recommendations are generated when antipatterns detected."""
+        from session_analytics.queries import analyze_pre_compaction_patterns
+
+        now = datetime.now()
+        compaction_time = now - timedelta(hours=1)
+        events = [
+            # Compaction event
+            Event(
+                id=None,
+                uuid="c1",
+                timestamp=compaction_time,
+                session_id="s1",
+                entry_type="compaction",
+            ),
+            # 15 consecutive reads (threshold is 5)
+            *[
+                Event(
+                    id=None,
+                    uuid=f"r{i}",
+                    timestamp=compaction_time - timedelta(minutes=i + 1),
+                    session_id="s1",
+                    entry_type="tool_use",
+                    tool_name="Read",
+                    file_path=f"/test/file{i}.py",
+                )
+                for i in range(15)
+            ],
+        ]
+        storage.add_events_batch(events)
+
+        result = analyze_pre_compaction_patterns(storage, days=7)
+
+        # Should have recommendations about consecutive reads
+        assert len(result["recommendations"]) >= 1
+        # At least one recommendation should mention reads
+        assert any("read" in r.lower() for r in result["recommendations"])
 
 
 class TestGetLargeToolResults:
