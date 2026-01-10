@@ -8,6 +8,7 @@ import pytest
 
 from session_analytics.ingest import (
     calculate_result_size,
+    decode_project_path,
     detect_compaction,
     extract_command_name,
     extract_text_from_content,
@@ -1475,3 +1476,64 @@ class TestDetectCompaction:
         """Regular summaries without the marker return False."""
         text = "This is a summary of the recent conversation about implementing a feature."
         assert detect_compaction(text) is False
+
+
+class TestDecodeProjectPath:
+    """Tests for decode_project_path() function."""
+
+    def test_none_returns_none(self):
+        """None input returns None."""
+        assert decode_project_path(None) is None
+
+    def test_empty_string_returns_none(self):
+        """Empty string returns None."""
+        assert decode_project_path("") is None
+
+    def test_simple_path(self, tmp_path):
+        """Simple path without hyphens in names decodes correctly."""
+        # Create /tmp/xxx/foo/bar
+        (tmp_path / "foo" / "bar").mkdir(parents=True)
+        # Encode: tmp_path looks like /var/folders/xxx or /tmp/pytest-xxx
+        # We'll test by encoding a known path and decoding it
+        encoded = str(tmp_path / "foo" / "bar").replace("/", "-")
+        result = decode_project_path(encoded)
+        assert result == tmp_path / "foo" / "bar"
+
+    def test_path_with_hyphens(self, tmp_path):
+        """Path with hyphens in directory names decodes correctly."""
+        # Create /tmp/xxx/my-project/src
+        (tmp_path / "my-project" / "src").mkdir(parents=True)
+        encoded = str(tmp_path / "my-project" / "src").replace("/", "-")
+        result = decode_project_path(encoded)
+        assert result == tmp_path / "my-project" / "src"
+
+    def test_nonexistent_path_returns_none(self):
+        """Path that doesn't exist returns None."""
+        result = decode_project_path("-Users-nonexistent-path-that-does-not-exist")
+        assert result is None
+
+    def test_ambiguous_path_finds_existing(self, tmp_path):
+        """When multiple interpretations possible, finds the existing one."""
+        # Create structure that could be /a-b/c or /a/b-c
+        # Only create /a-b/c
+        (tmp_path / "a-b" / "c").mkdir(parents=True)
+        encoded = str(tmp_path / "a-b" / "c").replace("/", "-")
+        result = decode_project_path(encoded)
+        assert result == tmp_path / "a-b" / "c"
+
+    def test_real_world_pattern(self, tmp_path):
+        """Pattern like claude-session-analytics decodes when directory exists."""
+        # Simulate: /projects/claude-session-analytics
+        (tmp_path / "projects" / "claude-session-analytics").mkdir(parents=True)
+        encoded = str(tmp_path / "projects" / "claude-session-analytics").replace("/", "-")
+        result = decode_project_path(encoded)
+        assert result == tmp_path / "projects" / "claude-session-analytics"
+
+    def test_file_not_directory_returns_none(self, tmp_path):
+        """Path pointing to a file (not directory) returns None."""
+        # Create a file
+        file_path = tmp_path / "myfile.txt"
+        file_path.write_text("test")
+        encoded = str(file_path).replace("/", "-")
+        result = decode_project_path(encoded)
+        assert result is None

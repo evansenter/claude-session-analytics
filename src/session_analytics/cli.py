@@ -9,6 +9,7 @@ import time
 from session_analytics.ingest import (
     correlate_git_with_sessions,
     ingest_git_history,
+    ingest_git_history_all_projects,
     ingest_logs,
 )
 from session_analytics.patterns import (
@@ -1063,6 +1064,16 @@ def cmd_git_correlate(args):
     print(format_output(result, args.json))
 
 
+def cmd_git_ingest_all(args):
+    """Ingest git history from all known projects."""
+    storage = SQLiteStorage()
+    result = ingest_git_history_all_projects(
+        storage,
+        days=args.days,
+    )
+    print(format_output(result, args.json))
+
+
 def cmd_signals(args):
     """Show raw session signals for LLM interpretation (RFC #26, revised per RFC #17)."""
     storage = SQLiteStorage()
@@ -1574,6 +1585,13 @@ Data location: ~/.claude/contrib/analytics/data.db
     sub = subparsers.add_parser("git-correlate", help="Correlate commits with sessions")
     sub.add_argument("--days", type=int, default=7, help="Days to correlate (default: 7)")
     sub.set_defaults(func=cmd_git_correlate)
+
+    # git-ingest-all
+    sub = subparsers.add_parser(
+        "git-ingest-all", help="Ingest git history from all known projects"
+    )
+    sub.add_argument("--days", type=int, default=7, help="Days of history (default: 7)")
+    sub.set_defaults(func=cmd_git_ingest_all)
 
     # signals (RFC #26, revised per RFC #17 - raw data, no interpretation)
     sub = subparsers.add_parser("signals", help="Show raw session signals for LLM interpretation")

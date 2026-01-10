@@ -259,6 +259,9 @@ Sync triggers maintain index consistency:
 | 7 | add_tool_id_index | Performance index for self-joins |
 | 8 | add_unified_message_text | Unified message_text column, rebuilt FTS on all entry types (Issue #68) |
 | 9 | add_result_size_bytes | result_size_bytes column for context efficiency tracking (Issue #69) |
+| 10 | backfill_compaction_and_result_size | Backfill compaction detection and result_size_bytes for existing data |
+| 11 | fix_compaction_detection_user_entries | Fix compaction detection to look at user entries (not just summary) |
+| 12 | fix_warmup_not_errors | Fix warmup events incorrectly marked as errors (Issue #75) |
 
 ---
 

@@ -593,6 +593,26 @@ def correlate_git_with_sessions(days: int = 7) -> dict:
 
 
 @mcp.tool()
+def ingest_git_history_all_projects(days: int = 7) -> dict:
+    """Ingest git commit history from all known projects.
+
+    Scans unique project paths from the events table, decodes them to filesystem
+    paths, and runs git ingestion on each that has a .git directory.
+
+    This is more comprehensive than ingest_git_history() which only processes
+    the current directory.
+
+    Args:
+        days: Number of days of history to ingest (default: 7)
+
+    Returns:
+        Aggregate stats across all projects including total commits added
+    """
+    result = ingest.ingest_git_history_all_projects(storage, days=days)
+    return {"status": "ok", **result}
+
+
+@mcp.tool()
 def get_session_signals(days: int = 7, min_count: int = 1) -> dict:
     """Get raw session signals for LLM interpretation.
 

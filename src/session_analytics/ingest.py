@@ -20,6 +20,50 @@ DEFAULT_LOGS_DIR = Path.home() / ".claude" / "projects"
 USER_MESSAGE_MAX_LENGTH = 2000
 
 
+def decode_project_path(encoded: str) -> Path | None:
+    """Decode an encoded project path back to a filesystem path.
+
+    Claude Code encodes project paths by replacing '/' with '-' in directory names.
+    e.g., "-Users-evansenter-Documents-projects-dotfiles" -> "/Users/evansenter/Documents/projects/dotfiles"
+
+    Handles paths with hyphens in directory names by trying to find valid paths.
+    e.g., "-Users-foo-my-project" could be "/Users/foo/my-project" or "/Users/foo-my/project"
+
+    Returns None if the decoded path doesn't exist or isn't a directory.
+    """
+    if not encoded:
+        return None
+
+    # Split on '-' and skip empty first part (from leading '-')
+    parts = encoded.split("-")
+    if parts and parts[0] == "":
+        parts = parts[1:]
+
+    if not parts:
+        return None
+
+    def find_path(remaining_parts: list[str], current_path: Path) -> Path | None:
+        """Recursively find valid path by trying different segment combinations."""
+        if not remaining_parts:
+            return current_path if current_path.is_dir() else None
+
+        # Try combining 1, 2, 3... segments with hyphens
+        for num_parts in range(1, len(remaining_parts) + 1):
+            segment = "-".join(remaining_parts[:num_parts])
+            candidate = current_path / segment
+
+            if candidate.exists():
+                # This segment exists, try to continue with remaining parts
+                result = find_path(remaining_parts[num_parts:], candidate)
+                if result is not None:
+                    return result
+
+        return None
+
+    # Start from root
+    return find_path(parts, Path("/"))
+
+
 def extract_text_from_content(content) -> str | None:
     """Extract text content from various message content formats.
 
@@ -402,6 +446,9 @@ def parse_entry(raw: dict, project_path: str) -> list[Event]:
                     is_error = tr.get("is_error", False)
                     # Issue #68: Extract tool result content
                     tool_result_text = extract_tool_result_content(tr)
+                    # Issue #75: Warmup exits are not real errors
+                    if is_error and tool_result_text == "Warmup":
+                        is_error = False
                     events.append(
                         Event(
                             id=None,
@@ -424,6 +471,10 @@ def parse_entry(raw: dict, project_path: str) -> list[Event]:
                     )
             else:
                 # User message with other content types
+                # Issue #69: Detect compaction markers in user messages
+                user_entry_type = "command" if command_name else "user"
+                if detect_compaction(message_text):
+                    user_entry_type = "compaction"
                 events.append(
                     Event(
                         id=None,
@@ -431,7 +482,7 @@ def parse_entry(raw: dict, project_path: str) -> list[Event]:
                         timestamp=timestamp,
                         session_id=session_id,
                         project_path=project_path,
-                        entry_type="command" if command_name else "user",
+                        entry_type=user_entry_type,
                         skill_name=command_name,  # Reuse skill_name for command tracking
                         user_message_text=user_message_text,
                         message_text=message_text,  # Issue #68: unified message text
@@ -446,6 +497,10 @@ def parse_entry(raw: dict, project_path: str) -> list[Event]:
                 )
         else:
             # Plain text user message
+            # Issue #69: Detect compaction markers in user messages
+            user_entry_type = "command" if command_name else "user"
+            if detect_compaction(message_text):
+                user_entry_type = "compaction"
             events.append(
                 Event(
                     id=None,
@@ -453,7 +508,7 @@ def parse_entry(raw: dict, project_path: str) -> list[Event]:
                     timestamp=timestamp,
                     session_id=session_id,
                     project_path=project_path,
-                    entry_type="command" if command_name else "user",
+                    entry_type=user_entry_type,
                     skill_name=command_name,  # Reuse skill_name for command tracking
                     user_message_text=user_message_text,
                     message_text=message_text,  # Issue #68: unified message text
@@ -785,6 +840,91 @@ def ingest_git_history(
             "error": "git command not found",
             "commits_added": 0,
         }
+
+
+def ingest_git_history_all_projects(
+    storage: SQLiteStorage,
+    days: int = 7,
+) -> dict:
+    """Ingest git commit history from all known projects.
+
+    Scans unique project paths from the events table, decodes them to filesystem
+    paths, and runs git ingestion on each that has a .git directory.
+
+    Args:
+        storage: Storage instance
+        days: Number of days of history to ingest (default: 7)
+
+    Returns:
+        Dict with aggregate stats across all projects
+    """
+    # Get unique project paths from events
+    rows = storage.execute_query(
+        """
+        SELECT DISTINCT project_path
+        FROM events
+        WHERE project_path IS NOT NULL
+        """
+    )
+
+    projects_found = len(rows)
+    projects_with_git = 0
+    projects_ingested = 0
+    projects_skipped = 0
+    projects_failed = 0
+    total_commits_added = 0
+    per_project_results = []
+
+    for row in rows:
+        encoded_path = row["project_path"]
+        decoded_path = decode_project_path(encoded_path)
+
+        if decoded_path is None:
+            projects_skipped += 1
+            logger.debug(f"Could not decode or find path: {encoded_path}")
+            continue
+
+        # Check if it's a git repo (directory) or worktree (.git file pointing to main repo)
+        git_path = decoded_path / ".git"
+        if not git_path.exists():
+            projects_skipped += 1
+            continue
+
+        projects_with_git += 1
+
+        # Run git ingestion
+        result = ingest_git_history(
+            storage=storage,
+            repo_path=decoded_path,
+            days=days,
+            project_path=encoded_path,
+        )
+
+        if "error" in result:
+            projects_failed += 1
+            logger.warning(f"Git ingestion failed for {decoded_path}: {result['error']}")
+        else:
+            projects_ingested += 1
+            total_commits_added += result.get("commits_added", 0)
+
+        per_project_results.append(
+            {
+                "project": str(decoded_path),
+                "commits_added": result.get("commits_added", 0),
+                "error": result.get("error"),
+            }
+        )
+
+    return {
+        "days": days,
+        "projects_found": projects_found,
+        "projects_with_git": projects_with_git,
+        "projects_ingested": projects_ingested,
+        "projects_skipped": projects_skipped,
+        "projects_failed": projects_failed,
+        "total_commits_added": total_commits_added,
+        "per_project": per_project_results,
+    }
 
 
 def correlate_git_with_sessions(

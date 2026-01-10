@@ -174,7 +174,7 @@ class BusEvent:
 DEFAULT_DB_PATH = Path.home() / ".claude" / "contrib" / "analytics" / "data.db"
 
 # Schema version for migrations
-SCHEMA_VERSION = 9
+SCHEMA_VERSION = 12
 
 # Migration functions: dict of version -> (migration_name, migration_func)
 # Each migration upgrades FROM version-1 TO version
@@ -500,6 +500,92 @@ def migrate_v9(conn):
 
     if "result_size_bytes" not in existing_cols:
         conn.execute("ALTER TABLE events ADD COLUMN result_size_bytes INTEGER")
+
+
+@migration(10, "backfill_compaction_and_result_size")
+def migrate_v10(conn):
+    """Backfill compaction detection and result_size_bytes for existing data.
+
+    Issue #69 follow-up: Migration 9 added the column and detection logic for
+    new ingestion, but existing data wasn't backfilled. This migration:
+
+    1. Updates entry_type to 'compaction' for existing user/summary entries
+       containing "continued from a previous conversation" marker
+    2. Backfills result_size_bytes for all entries with message_text
+
+    Note: Compaction markers appear in 'user' entries (system-injected continuation
+    messages), not 'summary' entries as originally assumed.
+
+    This is idempotent - safe to run multiple times.
+    """
+    # Backfill compaction detection for existing user/summary entries
+    # Note: The marker appears in 'user' entries, but we check both for safety
+    cursor = conn.execute(
+        """
+        UPDATE events
+        SET entry_type = 'compaction'
+        WHERE entry_type IN ('user', 'summary')
+          AND message_text LIKE '%continued from a previous conversation%'
+        """
+    )
+    compaction_count = cursor.rowcount
+    logger.info(f"Marked {compaction_count} existing entries as compaction events")
+
+    # Backfill result_size_bytes for all entries with message_text
+    cursor = conn.execute(
+        """
+        UPDATE events
+        SET result_size_bytes = LENGTH(message_text)
+        WHERE message_text IS NOT NULL
+          AND result_size_bytes IS NULL
+        """
+    )
+    size_count = cursor.rowcount
+    logger.info(f"Backfilled result_size_bytes for {size_count} entries")
+
+
+@migration(11, "fix_compaction_detection_user_entries")
+def migrate_v11(conn):
+    """Fix compaction detection to include user entries.
+
+    Issue #69 bug fix: Migration 10 only looked at 'summary' entries, but
+    compaction markers appear in 'user' entries (system-injected continuation
+    messages). This migration corrects that.
+
+    This is idempotent - safe to run multiple times.
+    """
+    cursor = conn.execute(
+        """
+        UPDATE events
+        SET entry_type = 'compaction'
+        WHERE entry_type = 'user'
+          AND message_text LIKE '%continued from a previous conversation%'
+        """
+    )
+    compaction_count = cursor.rowcount
+    logger.info(f"Fixed {compaction_count} user entries to compaction type")
+
+
+@migration(12, "fix_warmup_not_errors")
+def migrate_v12(conn):
+    """Fix warmup events incorrectly marked as errors.
+
+    Issue #75: Warmup events (Task tool invocations with max_turns: 1) were
+    marked as is_error=1 because they exit early. These are not real errors -
+    they're intentional early terminations for model pre-warming.
+
+    This migration clears is_error for all warmup events.
+    """
+    cursor = conn.execute(
+        """
+        UPDATE events
+        SET is_error = 0
+        WHERE is_error = 1
+          AND message_text = 'Warmup'
+        """
+    )
+    warmup_count = cursor.rowcount
+    logger.info(f"Fixed {warmup_count} warmup events from is_error=1 to is_error=0")
 
 
 class SQLiteStorage:
