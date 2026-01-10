@@ -70,8 +70,9 @@ CREATE TABLE events (
     cwd TEXT,
 
     -- User journey (RFC #17)
-    user_message_text TEXT,    -- For FTS search
+    user_message_text TEXT,    -- Deprecated: use message_text
     exit_code INTEGER,         -- Reserved for future extraction
+    message_text TEXT,         -- Unified text for all entry types (Issue #68)
 
     -- Agent tracking (RFC #41)
     parent_uuid TEXT,          -- Links tool_use to parent assistant event
@@ -86,7 +87,7 @@ CREATE TABLE events (
 **Key patterns**:
 - `entry_type='tool_use'` + `entry_type='tool_result'` are correlated by `tool_id`
 - Token columns only populated on `entry_type='assistant'` to avoid double-counting
-- `user_message_text` enables FTS via `events_fts` virtual table
+- `message_text` enables FTS via `events_fts` virtual table for all entry types
 - `tool_input_json` preserves full parameters for drill-down queries
 
 ### sessions
@@ -201,7 +202,7 @@ Performance-critical indexes on the `events` table:
 | `idx_events_tool_id` | `tool_id` | Self-join for tool_use ↔ tool_result correlation |
 | `idx_events_parent_uuid` | `parent_uuid` | Token deduplication queries |
 | `idx_events_agent_id` | `agent_id` | Agent activity breakdown |
-| `idx_events_has_user_message` | Partial on `id` | FTS join optimization |
+| `idx_events_has_message_text` | Partial on `id` | FTS join optimization (WHERE message_text IS NOT NULL) |
 
 **Performance note**: The `idx_events_tool_id` index is critical for `query_error_details()` which self-joins events to correlate errors with their input parameters. Without it, queries take ~25s on 160K rows; with it, ~0.3s.
 
@@ -223,18 +224,18 @@ Performance-critical indexes on the `events` table:
 
 ## Full-Text Search
 
-User messages are indexed via FTS5:
+All message types (user, assistant, tool_result, summary) are indexed via FTS5:
 
 ```sql
 CREATE VIRTUAL TABLE events_fts USING fts5(
-    user_message_text,
+    message_text,
     content='events',
     content_rowid='id'
 )
 ```
 
 Sync triggers maintain index consistency:
-- `events_fts_insert`: Populates FTS on new events
+- `events_fts_insert`: Populates FTS on new events with message_text
 - `events_fts_delete`: Removes from FTS on delete
 - `events_fts_update`: Handles message text changes
 
@@ -251,6 +252,7 @@ Sync triggers maintain index consistency:
 | 5 | add_agent_tracking | parent_uuid, agent_id, is_sidechain, version |
 | 6 | add_event_bus_integration | bus_events table |
 | 7 | add_tool_id_index | Performance index for self-joins |
+| 8 | add_unified_message_text | Unified message_text column, rebuilt FTS on all entry types (Issue #68) |
 
 ---
 

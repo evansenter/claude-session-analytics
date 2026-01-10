@@ -217,7 +217,7 @@ class TestGetUserJourney:
                 session_id="s1",
                 project_path="project-a",
                 entry_type="user",
-                user_message_text="Start working on feature",
+                message_text="Start working on feature",
             ),
             Event(
                 id=None,
@@ -226,7 +226,7 @@ class TestGetUserJourney:
                 session_id="s2",
                 project_path="project-b",
                 entry_type="user",
-                user_message_text="Fix bug in other project",
+                message_text="Fix bug in other project",
             ),
         ]
         storage.add_events_batch(events)
@@ -249,7 +249,7 @@ class TestGetUserJourney:
                 timestamp=now - timedelta(hours=1),
                 session_id="s1",
                 entry_type="user",
-                user_message_text="User message",
+                message_text="User message",
             ),
             Event(
                 id=None,
@@ -281,7 +281,7 @@ class TestGetUserJourney:
                 session_id="session-target",
                 project_path="project-a",
                 entry_type="user",
-                user_message_text="Message from target session",
+                message_text="Message from target session",
             )
         )
         storage.add_event(
@@ -292,7 +292,7 @@ class TestGetUserJourney:
                 session_id="session-other",
                 project_path="project-a",
                 entry_type="user",
-                user_message_text="Message from other session",
+                message_text="Message from other session",
             )
         )
 
@@ -302,6 +302,119 @@ class TestGetUserJourney:
         assert result["session_id"] == "session-target"
         assert result["message_count"] == 1
         assert result["journey"][0]["session_id"] == "session-target"
+
+    def test_journey_includes_assistant_messages(self, storage):
+        """Test that journey includes assistant messages by default."""
+        from session_analytics.queries import get_user_journey
+
+        now = datetime.now()
+        events = [
+            Event(
+                id=None,
+                uuid="u1",
+                timestamp=now - timedelta(hours=1),
+                session_id="s1",
+                entry_type="user",
+                message_text="User question",
+            ),
+            Event(
+                id=None,
+                uuid="a1",
+                timestamp=now - timedelta(minutes=59),
+                session_id="s1",
+                entry_type="assistant",
+                message_text="Assistant response",
+            ),
+        ]
+        storage.add_events_batch(events)
+
+        result = get_user_journey(storage, hours=24)
+
+        # Default should include both user and assistant
+        assert result["message_count"] == 2
+        assert result["entry_types"] == ["user", "assistant"]
+        types = [e["type"] for e in result["journey"]]
+        assert "user" in types
+        assert "assistant" in types
+
+    def test_journey_custom_entry_types(self, storage):
+        """Test filtering by custom entry_types."""
+        from session_analytics.queries import get_user_journey
+
+        now = datetime.now()
+        events = [
+            Event(
+                id=None,
+                uuid="u1",
+                timestamp=now - timedelta(hours=1),
+                session_id="s1",
+                entry_type="user",
+                message_text="User message",
+            ),
+            Event(
+                id=None,
+                uuid="a1",
+                timestamp=now - timedelta(minutes=50),
+                session_id="s1",
+                entry_type="assistant",
+                message_text="Assistant message",
+            ),
+            Event(
+                id=None,
+                uuid="tr1",
+                timestamp=now - timedelta(minutes=40),
+                session_id="s1",
+                entry_type="tool_result",
+                message_text="Tool output content",
+            ),
+        ]
+        storage.add_events_batch(events)
+
+        # Only user messages
+        result = get_user_journey(storage, hours=24, entry_types=["user"])
+        assert result["message_count"] == 1
+        assert result["journey"][0]["type"] == "user"
+
+        # Only tool_result
+        result = get_user_journey(storage, hours=24, entry_types=["tool_result"])
+        assert result["message_count"] == 1
+        assert result["journey"][0]["type"] == "tool_result"
+
+        # All three
+        result = get_user_journey(
+            storage, hours=24, entry_types=["user", "assistant", "tool_result"]
+        )
+        assert result["message_count"] == 3
+
+    def test_journey_max_message_length_truncation(self, storage):
+        """Test message truncation with max_message_length."""
+        from session_analytics.queries import get_user_journey
+
+        now = datetime.now()
+        long_message = "A" * 1000
+        events = [
+            Event(
+                id=None,
+                uuid="u1",
+                timestamp=now - timedelta(hours=1),
+                session_id="s1",
+                entry_type="user",
+                message_text=long_message,
+            ),
+        ]
+        storage.add_events_batch(events)
+
+        # Default truncation (500)
+        result = get_user_journey(storage, hours=24)
+        assert len(result["journey"][0]["message"]) == 500
+
+        # Custom truncation
+        result = get_user_journey(storage, hours=24, max_message_length=100)
+        assert len(result["journey"][0]["message"]) == 100
+
+        # No truncation (0)
+        result = get_user_journey(storage, hours=24, max_message_length=0)
+        assert len(result["journey"][0]["message"]) == 1000
 
 
 class TestDetectParallelSessions:
@@ -623,7 +736,7 @@ class TestGetHandoffContext:
                 session_id="test-session",
                 project_path="/test/project",
                 entry_type="user",
-                user_message_text="Hello, let's start",
+                message_text="Hello, let's start",
             ),
             Event(
                 id=None,
@@ -667,7 +780,7 @@ class TestGetHandoffContext:
                 timestamp=now - timedelta(hours=1),
                 session_id="msg-session",
                 entry_type="user",
-                user_message_text="First message",
+                message_text="First message",
             ),
             Event(
                 id=None,
@@ -675,7 +788,7 @@ class TestGetHandoffContext:
                 timestamp=now - timedelta(minutes=30),
                 session_id="msg-session",
                 entry_type="user",
-                user_message_text="Second message",
+                message_text="Second message",
             ),
         ]
         storage.add_events_batch(events)
@@ -1185,7 +1298,7 @@ class TestGetUserJourneyIncludeProjects:
                 session_id="s1",
                 project_path="project-a",
                 entry_type="user",
-                user_message_text="First message",
+                message_text="First message",
             ),
             Event(
                 id=None,
@@ -1194,7 +1307,7 @@ class TestGetUserJourneyIncludeProjects:
                 session_id="s2",
                 project_path="project-b",
                 entry_type="user",
-                user_message_text="Second message",
+                message_text="Second message",
             ),
         ]
         storage.add_events_batch(events)

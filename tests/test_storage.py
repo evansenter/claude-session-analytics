@@ -435,14 +435,14 @@ class TestNewEventFields:
             timestamp=datetime.now(),
             session_id="session-1",
             entry_type="user",
-            user_message_text="Hello, please help me with something",
+            message_text="Hello, please help me with something",
         )
         stored = storage.add_event(event)
         assert stored.id is not None
 
         events = storage.get_events_in_range()
         assert len(events) == 1
-        assert events[0].user_message_text == "Hello, please help me with something"
+        assert events[0].message_text == "Hello, please help me with something"
 
     def test_event_with_exit_code(self, storage):
         """Test storing and retrieving exit_code."""
@@ -469,13 +469,13 @@ class TestNewEventFields:
             timestamp=datetime.now(),
             session_id="session-1",
             entry_type="user",
-            user_message_text="Run a command",
+            message_text="Run a command",
             exit_code=0,
         )
         storage.add_event(event)
 
         events = storage.get_events_in_range()
-        assert events[0].user_message_text == "Run a command"
+        assert events[0].message_text == "Run a command"
         assert events[0].exit_code == 0
 
     def test_event_with_null_new_fields(self, storage):
@@ -492,7 +492,7 @@ class TestNewEventFields:
 
         events = storage.get_events_in_range()
         assert len(events) == 1
-        assert events[0].user_message_text is None
+        assert events[0].message_text is None
         assert events[0].exit_code is None
 
 
@@ -509,7 +509,7 @@ class TestFullTextSearch:
                 timestamp=datetime.now(),
                 session_id="session-1",
                 entry_type="user",
-                user_message_text="Help me debug the authentication error",
+                message_text="Help me debug the authentication error",
             )
         )
         storage.add_event(
@@ -519,7 +519,7 @@ class TestFullTextSearch:
                 timestamp=datetime.now(),
                 session_id="session-1",
                 entry_type="user",
-                user_message_text="Fix the database connection issue",
+                message_text="Fix the database connection issue",
             )
         )
         storage.add_event(
@@ -529,19 +529,19 @@ class TestFullTextSearch:
                 timestamp=datetime.now(),
                 session_id="session-1",
                 entry_type="user",
-                user_message_text="Another error message to debug",
+                message_text="Another error message to debug",
             )
         )
 
         # Search for "debug"
         results = storage.search_user_messages("debug")
         assert len(results) == 2
-        assert all("debug" in r.user_message_text.lower() for r in results)
+        assert all("debug" in r.message_text.lower() for r in results)
 
         # Search for "authentication"
         results = storage.search_user_messages("authentication")
         assert len(results) == 1
-        assert "authentication" in results[0].user_message_text.lower()
+        assert "authentication" in results[0].message_text.lower()
 
     def test_search_user_messages_no_match(self, storage):
         """Test search returns empty when no matches found."""
@@ -552,7 +552,7 @@ class TestFullTextSearch:
                 timestamp=datetime.now(),
                 session_id="session-1",
                 entry_type="user",
-                user_message_text="This is a test message",
+                message_text="This is a test message",
             )
         )
 
@@ -568,7 +568,7 @@ class TestFullTextSearch:
                 timestamp=datetime.now(),
                 session_id="session-1",
                 entry_type="user",
-                user_message_text="Run the unit tests",
+                message_text="Run the unit tests",
             )
         )
         storage.add_event(
@@ -578,14 +578,89 @@ class TestFullTextSearch:
                 timestamp=datetime.now(),
                 session_id="session-1",
                 entry_type="user",
-                user_message_text="Unit testing is important",
+                message_text="Unit testing is important",
             )
         )
 
         # Search for phrase "unit tests"
         results = storage.search_user_messages('"unit tests"')
         assert len(results) == 1
-        assert "unit tests" in results[0].user_message_text.lower()
+        assert "unit tests" in results[0].message_text.lower()
+
+    def test_search_messages_all_types(self, storage):
+        """Test search_messages finds content in all message types."""
+        # Add events of different types with searchable text
+        storage.add_event(
+            Event(
+                id=None,
+                uuid="user-msg",
+                timestamp=datetime.now(),
+                session_id="session-1",
+                entry_type="user",
+                message_text="User asks about authentication",
+            )
+        )
+        storage.add_event(
+            Event(
+                id=None,
+                uuid="assistant-msg",
+                timestamp=datetime.now(),
+                session_id="session-1",
+                entry_type="assistant",
+                message_text="Assistant explains authentication flow",
+            )
+        )
+        storage.add_event(
+            Event(
+                id=None,
+                uuid="tool-result",
+                timestamp=datetime.now(),
+                session_id="session-1",
+                entry_type="tool_result",
+                message_text="Tool output: authentication successful",
+            )
+        )
+
+        # Search all message types (default)
+        results = storage.search_messages("authentication")
+        assert len(results) == 3
+
+    def test_search_messages_with_entry_types_filter(self, storage):
+        """Test search_messages with entry_types filter."""
+        storage.add_event(
+            Event(
+                id=None,
+                uuid="user-search",
+                timestamp=datetime.now(),
+                session_id="session-1",
+                entry_type="user",
+                message_text="User database query",
+            )
+        )
+        storage.add_event(
+            Event(
+                id=None,
+                uuid="assistant-search",
+                timestamp=datetime.now(),
+                session_id="session-1",
+                entry_type="assistant",
+                message_text="Assistant database response",
+            )
+        )
+
+        # Only user messages
+        results = storage.search_messages("database", entry_types=["user"])
+        assert len(results) == 1
+        assert results[0].entry_type == "user"
+
+        # Only assistant messages
+        results = storage.search_messages("database", entry_types=["assistant"])
+        assert len(results) == 1
+        assert results[0].entry_type == "assistant"
+
+        # Both
+        results = storage.search_messages("database", entry_types=["user", "assistant"])
+        assert len(results) == 2
 
 
 class TestFTSTriggers:
@@ -600,7 +675,7 @@ class TestFTSTriggers:
                 timestamp=datetime.now(),
                 session_id="session-1",
                 entry_type="user",
-                user_message_text="searchable insert content",
+                message_text="searchable insert content",
             )
         )
 
@@ -619,7 +694,7 @@ class TestFTSTriggers:
                 timestamp=datetime.now(),
                 session_id="session-1",
                 entry_type="user",
-                user_message_text=None,
+                message_text=None,
             )
         )
 
@@ -629,7 +704,7 @@ class TestFTSTriggers:
 
         # Update to add user_message_text
         storage.execute_write(
-            "UPDATE events SET user_message_text = ? WHERE uuid = ?",
+            "UPDATE events SET message_text = ? WHERE uuid = ?",
             ("updated content here", "update-null-test"),
         )
 
@@ -647,7 +722,7 @@ class TestFTSTriggers:
                 timestamp=datetime.now(),
                 session_id="session-1",
                 entry_type="user",
-                user_message_text="original searchterm",
+                message_text="original searchterm",
             )
         )
 
@@ -657,7 +732,7 @@ class TestFTSTriggers:
 
         # Update to different value
         storage.execute_write(
-            "UPDATE events SET user_message_text = ? WHERE uuid = ?",
+            "UPDATE events SET message_text = ? WHERE uuid = ?",
             ("replacement searchterm", "update-value-test"),
         )
 
@@ -679,7 +754,7 @@ class TestFTSTriggers:
                 timestamp=datetime.now(),
                 session_id="session-1",
                 entry_type="user",
-                user_message_text="removable content",
+                message_text="removable content",
             )
         )
 
@@ -689,7 +764,7 @@ class TestFTSTriggers:
 
         # Update to NULL
         storage.execute_write(
-            "UPDATE events SET user_message_text = NULL WHERE uuid = ?",
+            "UPDATE events SET message_text = NULL WHERE uuid = ?",
             ("update-to-null-test",),
         )
 

@@ -294,17 +294,22 @@ def get_session_messages(
     include_projects: bool = True,
     session_id: str | None = None,
     limit: int = 100,
+    entry_types: list[str] | None = None,
+    max_message_length: int = 500,
 ) -> dict:
-    """Get all user messages chronologically across sessions.
+    """Get messages chronologically across sessions.
 
     Shows how the user moved across sessions and projects over time,
     revealing task switching, project interleaving, and work patterns.
+    Includes both user messages and assistant responses for conversation replay.
 
     Args:
         days: Number of days to look back (default: 1, supports fractions like 0.5 for 12h)
         include_projects: Include project info in output (default: True)
         session_id: Optional session ID filter (get messages from specific session)
         limit: Maximum messages to return (default: 100)
+        entry_types: Which entry types to include (default: ["user", "assistant"])
+        max_message_length: Truncate messages to this length (default: 500, 0=no limit)
 
     Returns:
         Journey events with timestamps, sessions, and messages
@@ -317,18 +322,24 @@ def get_session_messages(
         include_projects=include_projects,
         session_id=session_id,
         limit=limit,
+        entry_types=entry_types,
+        max_message_length=max_message_length,
     )
     return {"status": "ok", **result}
 
 
 @mcp.tool()
-def search_messages(query: str, limit: int = 50, project: str | None = None) -> dict:
-    """Search user messages using full-text search.
+def search_messages(
+    query: str,
+    limit: int = 50,
+    project: str | None = None,
+    entry_types: list[str] | None = None,
+) -> dict:
+    """Search messages using full-text search.
 
-    Uses FTS5 to efficiently search across all user messages. Useful for finding
-    discussions about specific topics, decisions, or patterns across sessions.
-
-    Note: Searches user messages only, not assistant responses.
+    Uses FTS5 to efficiently search across all message types (user, assistant,
+    tool_result, summary). Useful for finding discussions about specific topics,
+    decisions, or patterns across sessions.
 
     Args:
         query: FTS5 query string. Supports:
@@ -338,13 +349,16 @@ def search_messages(query: str, limit: int = 50, project: str | None = None) -> 
             - Prefix: "implement*"
         limit: Maximum results to return (default: 50)
         project: Optional project path filter
+        entry_types: Optional list of entry types to filter (e.g., ["user", "assistant"])
 
     Returns:
         Matching messages with session context and timestamps
     """
     queries.ensure_fresh_data(storage)
     try:
-        results = storage.search_user_messages(query, limit=limit, project=project)
+        results = storage.search_messages(
+            query, limit=limit, project=project, entry_types=entry_types
+        )
     except sqlite3.OperationalError as e:
         # Catch FTS5-related errors (syntax, unterminated strings, etc.)
         return {
@@ -356,13 +370,15 @@ def search_messages(query: str, limit: int = 50, project: str | None = None) -> 
         "status": "ok",
         "query": query,
         "project": project,
+        "entry_types": entry_types,
         "count": len(results),
         "messages": [
             {
                 "timestamp": e.timestamp.isoformat() if e.timestamp else None,
                 "session_id": e.session_id,
                 "project": e.project_path,
-                "message": e.user_message_text,
+                "type": e.entry_type,
+                "message": e.message_text,
             }
             for e in results
         ],

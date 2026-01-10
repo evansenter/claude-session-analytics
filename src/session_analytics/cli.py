@@ -280,9 +280,11 @@ def _format_sample_sequences(data: dict) -> list[str]:
 
 @_register_formatter(lambda d: "journey" in d and "message_count" in d)
 def _format_user_journey(data: dict) -> list[str]:
+    entry_types = data.get("entry_types", ["user", "assistant"])
     lines = [
-        f"User Journey (last {data['hours']} hours)",
+        f"Session Messages (last {data['hours']} hours)",
         f"Messages: {data['message_count']}",
+        f"Types: {', '.join(entry_types)}",
     ]
     if data.get("projects_visited"):
         lines.append(f"Projects: {len(data['projects_visited'])}")
@@ -292,29 +294,36 @@ def _format_user_journey(data: dict) -> list[str]:
     for event in data.get("journey", []):
         ts = event.get("timestamp", "")[:16] if event.get("timestamp") else "unknown"
         msg = event.get("message", "") if event.get("message") else ""
+        msg_type = event.get("type", "user")
         project = event.get("project", "")
+        type_prefix = f"[{msg_type[0].upper()}]"  # [U], [A], [T], [S]
         if project:
-            lines.append(f"  [{ts}] ({project}) {msg}")
+            lines.append(f"  [{ts}] {type_prefix} ({project}) {msg}")
         else:
-            lines.append(f"  [{ts}] {msg}")
+            lines.append(f"  [{ts}] {type_prefix} {msg}")
     return lines
 
 
 @_register_formatter(lambda d: "query" in d and "messages" in d and "count" in d)
 def _format_search_results(data: dict) -> list[str]:
+    entry_types = data.get("entry_types")
     lines = [
         f"Search: {data['query']}",
         f"Results: {data['count']}",
-        "",
     ]
+    if entry_types:
+        lines.append(f"Types: {', '.join(entry_types)}")
+    lines.append("")
     for msg in data.get("messages", []):
         ts = msg.get("timestamp", "")[:16] if msg.get("timestamp") else "unknown"
         text = msg.get("message", "") if msg.get("message") else ""
+        msg_type = msg.get("type", "user")
         project = msg.get("project", "")
+        type_prefix = f"[{msg_type[0].upper()}]"  # [U], [A], [T], [S]
         if project:
-            lines.append(f"  [{ts}] ({project}) {text}")
+            lines.append(f"  [{ts}] {type_prefix} ({project}) {text}")
         else:
-            lines.append(f"  [{ts}] {text}")
+            lines.append(f"  [{ts}] {type_prefix} {text}")
     return lines
 
 
@@ -795,25 +804,36 @@ def cmd_sample_sequences(args):
 
 
 def cmd_journey(args):
-    """Show user messages across sessions."""
+    """Show messages across sessions."""
     storage = SQLiteStorage()
     hours = int(args.days * 24)
+    entry_types = getattr(args, "entry_types", None)
+    if entry_types:
+        entry_types = [t.strip() for t in entry_types.split(",")]
+    max_length = getattr(args, "max_length", 500)
     result = get_user_journey(
         storage,
         hours=hours,
         include_projects=not args.no_projects,
         session_id=getattr(args, "session_id", None),
         limit=args.limit,
+        entry_types=entry_types,
+        max_message_length=max_length,
     )
     print(format_output(result, args.json))
 
 
 def cmd_search(args):
-    """Search user messages using full-text search."""
+    """Search messages using full-text search."""
     storage = SQLiteStorage()
     project = getattr(args, "project", None)
+    entry_types = getattr(args, "entry_types", None)
+    if entry_types:
+        entry_types = [t.strip() for t in entry_types.split(",")]
     try:
-        results = storage.search_user_messages(args.query, limit=args.limit, project=project)
+        results = storage.search_messages(
+            args.query, limit=args.limit, project=project, entry_types=entry_types
+        )
     except sqlite3.OperationalError as e:
         # Catch FTS5-related errors (syntax, unterminated strings, etc.)
         output = {
@@ -826,13 +846,15 @@ def cmd_search(args):
     output = {
         "query": args.query,
         "project": project,
+        "entry_types": entry_types,
         "count": len(results),
         "messages": [
             {
                 "timestamp": e.timestamp.isoformat() if e.timestamp else None,
                 "session_id": e.session_id,
                 "project": e.project_path,
-                "message": e.user_message_text,
+                "type": e.entry_type,
+                "message": e.message_text,
             }
             for e in results
         ],
@@ -1136,8 +1158,16 @@ def cmd_benchmark(args):
             storage, pattern="Read → Edit", count=2
         ),
         "get_permission_gaps": lambda: patterns_compute_permission_gaps(storage, days=7),
-        "get_session_messages": lambda: queries_get_user_journey(storage, hours=24),
-        "search_messages": lambda: storage.search_user_messages("test", limit=10),
+        "get_session_messages": lambda: queries_get_user_journey(
+            storage, hours=24, entry_types=["user", "assistant"]
+        ),
+        "get_session_messages_all": lambda: queries_get_user_journey(
+            storage, hours=24, entry_types=["user", "assistant", "tool_result"]
+        ),
+        "search_messages": lambda: storage.search_messages("test", limit=10),
+        "search_messages_filtered": lambda: storage.search_messages(
+            "test", limit=10, entry_types=["user", "assistant"]
+        ),
         "detect_parallel_sessions": lambda: queries_detect_parallel_sessions(storage, hours=24),
         "get_insights": lambda: patterns_get_insights(storage, refresh=False, days=7),
         "analyze_failures": lambda: patterns_analyze_failures(storage, days=7),
@@ -1287,20 +1317,30 @@ Data location: ~/.claude/contrib/analytics/data.db
     sub.set_defaults(func=cmd_sample_sequences)
 
     # journey (maps to get_session_messages MCP tool)
-    sub = subparsers.add_parser("journey", help="Show user messages across sessions")
+    sub = subparsers.add_parser("journey", help="Show messages across sessions")
     sub.add_argument(
         "--days", type=float, default=1, help="Days to look back (default: 1, supports 0.5 for 12h)"
     )
     sub.add_argument("--limit", type=int, default=100, help="Max messages (default: 100)")
     sub.add_argument("--no-projects", action="store_true", help="Exclude project info")
     sub.add_argument("--session-id", help="Filter to specific session ID")
+    sub.add_argument(
+        "--entry-types",
+        help="Entry types to include, comma-separated (default: user,assistant)",
+    )
+    sub.add_argument(
+        "--max-length", type=int, default=500, help="Max message length (default: 500, 0=no limit)"
+    )
     sub.set_defaults(func=cmd_journey)
 
     # search
-    sub = subparsers.add_parser("search", help="Search user messages (FTS)")
+    sub = subparsers.add_parser("search", help="Search messages (FTS)")
     sub.add_argument("query", help="FTS5 query (e.g., 'auth', '\"fix bug\"', 'skip OR defer')")
     sub.add_argument("--limit", type=int, default=50, help="Max results (default: 50)")
     sub.add_argument("--project", help="Project path filter")
+    sub.add_argument(
+        "--entry-types", help="Entry types to search, comma-separated (default: all)"
+    )
     sub.set_defaults(func=cmd_search)
 
     # parallel

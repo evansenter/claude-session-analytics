@@ -1,5 +1,7 @@
 """Query implementations for session analytics."""
 
+from __future__ import annotations
+
 import re
 from datetime import datetime, timedelta
 
@@ -657,11 +659,14 @@ def get_user_journey(
     include_projects: bool = True,
     session_id: str | None = None,
     limit: int = 100,
+    entry_types: list[str] | None = None,
+    max_message_length: int = 500,
 ) -> dict:
-    """Get all user messages chronologically across sessions.
+    """Get messages chronologically across sessions.
 
     Shows how the user moved across sessions and projects over time,
     revealing task switching, project interleaving, and work patterns.
+    Includes both user messages and assistant responses for conversation replay.
 
     Args:
         storage: Storage instance
@@ -669,11 +674,17 @@ def get_user_journey(
         include_projects: Include project info in output (default: True)
         session_id: Optional session ID filter (get messages from specific session)
         limit: Maximum messages to return (default: 100)
+        entry_types: Which entry types to include (default: ["user", "assistant"])
+        max_message_length: Truncate messages to this length (default: 500, 0=no limit)
 
     Returns:
         Dict with journey events and pattern analysis
     """
     cutoff = get_cutoff(hours=hours)
+
+    # Default to user and assistant messages
+    if entry_types is None:
+        entry_types = ["user", "assistant"]
 
     # Build query with optional session_id filter
     session_filter = ""
@@ -681,21 +692,26 @@ def get_user_journey(
     if session_id:
         session_filter = "AND session_id = ?"
         params.append(session_id)
+
+    # Build entry_type filter
+    type_placeholders = ",".join("?" * len(entry_types))
+    params.extend(entry_types)
     params.append(limit)
 
-    # Query user messages ordered by timestamp
+    # Query messages ordered by timestamp
     rows = storage.execute_query(
         f"""
         SELECT
             timestamp,
             session_id,
             project_path,
-            user_message_text
+            entry_type,
+            message_text
         FROM events
         WHERE timestamp >= ?
-          AND entry_type = 'user'
-          AND user_message_text IS NOT NULL
+          AND message_text IS NOT NULL
           {session_filter}
+          AND entry_type IN ({type_placeholders})
         ORDER BY timestamp ASC
         LIMIT ?
         """,
@@ -716,10 +732,16 @@ def get_user_journey(
                 project_switches += 1
             last_project = project
 
+        # Truncate message if max_message_length is set
+        message_text = row["message_text"]
+        if message_text and max_message_length > 0:
+            message_text = message_text[:max_message_length]
+
         event = {
             "timestamp": row["timestamp"].isoformat() if row["timestamp"] else None,
             "session_id": row["session_id"],
-            "message": row["user_message_text"][:200] if row["user_message_text"] else None,
+            "type": row["entry_type"],
+            "message": message_text,
         }
         if include_projects:
             event["project"] = project
@@ -728,6 +750,7 @@ def get_user_journey(
     return {
         "hours": hours,
         "session_id": session_id,
+        "entry_types": entry_types,
         "message_count": len(journey),
         "projects_visited": list(projects_seen) if include_projects else None,
         "project_switches": project_switches if include_projects else None,
@@ -1288,11 +1311,11 @@ def get_handoff_context(
     # Get recent user messages
     messages = storage.execute_query(
         """
-        SELECT timestamp, user_message_text
+        SELECT timestamp, message_text
         FROM events
         WHERE session_id = ?
           AND entry_type = 'user'
-          AND user_message_text IS NOT NULL
+          AND message_text IS NOT NULL
         ORDER BY timestamp DESC
         LIMIT ?
         """,
@@ -1302,7 +1325,7 @@ def get_handoff_context(
     recent_messages = [
         {
             "timestamp": _format_timestamp(m["timestamp"]),
-            "message": m["user_message_text"][:200] if m["user_message_text"] else None,
+            "message": m["message_text"][:200] if m["message_text"] else None,
         }
         for m in messages
     ]

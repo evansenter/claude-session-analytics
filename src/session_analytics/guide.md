@@ -74,12 +74,16 @@ Each session includes `classification_factors` explaining WHY it was categorized
 |------|---------|
 | `analyze_trends(days?, compare_to?)` | Token/event trends with growth rates |
 
-### User Messages
+### Session Messages
 
 | Tool | Purpose |
 |------|---------|
-| `get_session_messages(days?, project?, session_id?)` | User messages across sessions chronologically |
-| `search_messages(query, limit?)` | Full-text search on user messages (FTS5) |
+| `get_session_messages(days?, session_id?, entry_types?, max_message_length?)` | Messages across sessions chronologically (user + assistant by default) |
+| `search_messages(query, limit?, entry_types?)` | Full-text search across all message types (FTS5) |
+
+**entry_types**: Filter by `["user"]`, `["assistant"]`, `["tool_result"]`, `["summary"]` or any combination. Default: `["user", "assistant"]`.
+
+**max_message_length**: Truncate messages (default: 500, 0=no limit).
 
 ### Session Relationships
 
@@ -169,9 +173,9 @@ use the APIs however best fits your needs.
 │                     DRILL INTO SPECIFICS                         │
 ├─────────────────────────────────────────────────────────────────┤
 │  get_session_events(session_id=X)   → Full event trace          │
-│  get_session_messages(session_id=X) → User intent               │
+│  get_session_messages(session_id=X) → User+assistant messages   │
 │  get_session_commits(session_id=X)  → Work products             │
-│  search_messages("query")           → Find specific topics      │
+│  search_messages("query")           → Find across all messages  │
 └─────────────────────────────────────────────────────────────────┘
 ```
 

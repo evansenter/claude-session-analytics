@@ -124,7 +124,7 @@ def populated_storage(storage):
             session_id="session-1",
             project_path="-test-project",
             entry_type="user",
-            user_message_text="Fix the authentication bug in the login flow",
+            message_text="Fix the authentication bug in the login flow",
         ),
         Event(
             id=None,
@@ -133,7 +133,7 @@ def populated_storage(storage):
             session_id="session-1",
             project_path="-test-project",
             entry_type="user",
-            user_message_text="Add unit tests for the API endpoints",
+            message_text="Add unit tests for the API endpoints",
         ),
     ]
     storage.add_events_batch(events)

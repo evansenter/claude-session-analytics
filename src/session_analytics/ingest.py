@@ -1,5 +1,7 @@
 """JSONL log ingestion for Claude Code session analytics."""
 
+from __future__ import annotations
+
 import json
 import logging
 import re
@@ -16,6 +18,74 @@ DEFAULT_LOGS_DIR = Path.home() / ".claude" / "projects"
 
 # Maximum length for user message text to prevent DB bloat while preserving context
 USER_MESSAGE_MAX_LENGTH = 2000
+
+# No limit for message_text - user requested full content including tool results
+# Set to None to indicate no truncation
+MESSAGE_TEXT_MAX_LENGTH = None
+
+
+def extract_text_from_content(content) -> str | None:
+    """Extract text content from various message content formats.
+
+    Handles:
+    - Plain strings
+    - List of content blocks (text, tool_use, tool_result, etc.)
+
+    Returns concatenated text from all text blocks, or None if no text found.
+    """
+    if content is None:
+        return None
+
+    if isinstance(content, str):
+        return content if content else None
+
+    if isinstance(content, list):
+        text_parts = []
+        for item in content:
+            if isinstance(item, str):
+                text_parts.append(item)
+            elif isinstance(item, dict):
+                item_type = item.get("type")
+                if item_type == "text":
+                    text_parts.append(item.get("text", ""))
+                # Skip tool_use, tool_result - they're handled separately
+        if text_parts:
+            return " ".join(text_parts)
+
+    return None
+
+
+def extract_tool_result_content(tool_result: dict) -> str | None:
+    """Extract content from a tool_result block.
+
+    Tool results can have various content formats:
+    - String content directly
+    - List of content blocks
+    - Nested content structures
+    """
+    content = tool_result.get("content")
+    if content is None:
+        return None
+
+    if isinstance(content, str):
+        return content if content else None
+
+    if isinstance(content, list):
+        text_parts = []
+        for item in content:
+            if isinstance(item, str):
+                text_parts.append(item)
+            elif isinstance(item, dict):
+                item_type = item.get("type")
+                if item_type == "text":
+                    text_parts.append(item.get("text", ""))
+                elif item_type == "image":
+                    # Image results - just note that an image was returned
+                    text_parts.append("[image]")
+        if text_parts:
+            return "\n".join(text_parts)
+
+    return None
 
 
 def find_log_files(
@@ -212,6 +282,9 @@ def parse_entry(raw: dict, project_path: str) -> list[Event]:
         content = message.get("content", [])
         tool_uses = [c for c in content if isinstance(c, dict) and c.get("type") == "tool_use"]
 
+        # Extract assistant's text response (Issue #68)
+        assistant_text = extract_text_from_content(content)
+
         # ALWAYS create assistant event with tokens (fixes token duplication)
         events.append(
             Event(
@@ -228,6 +301,7 @@ def parse_entry(raw: dict, project_path: str) -> list[Event]:
                 model=model,
                 git_branch=git_branch,
                 cwd=cwd,
+                message_text=assistant_text,  # Issue #68: unified message text
                 # RFC #41: Agent tracking fields
                 parent_uuid=None,  # Assistant events have no parent
                 agent_id=agent_id,
@@ -275,7 +349,7 @@ def parse_entry(raw: dict, project_path: str) -> list[Event]:
     elif entry_type == "user":
         content = message.get("content", "")
 
-        # Extract user message text for user journey tracking
+        # Extract user message text for user journey tracking (truncated for backwards compat)
         user_message_text = None
         if isinstance(content, str):
             user_message_text = content[:USER_MESSAGE_MAX_LENGTH] if content else None
@@ -289,6 +363,9 @@ def parse_entry(raw: dict, project_path: str) -> list[Event]:
                     text_parts.append(item)
             if text_parts:
                 user_message_text = " ".join(text_parts)[:USER_MESSAGE_MAX_LENGTH]
+
+        # Issue #68: Extract full message text (no truncation)
+        message_text = extract_text_from_content(content)
 
         # Extract command name from isMeta user messages (slash command expansions)
         # e.g., /status-report expands to a user message starting with "# Status Report"
@@ -304,6 +381,8 @@ def parse_entry(raw: dict, project_path: str) -> list[Event]:
                 for tr in tool_results:
                     # Check for error
                     is_error = tr.get("is_error", False)
+                    # Issue #68: Extract tool result content
+                    tool_result_text = extract_tool_result_content(tr)
                     events.append(
                         Event(
                             id=None,
@@ -316,6 +395,7 @@ def parse_entry(raw: dict, project_path: str) -> list[Event]:
                             is_error=is_error,
                             git_branch=git_branch,
                             cwd=cwd,
+                            message_text=tool_result_text,  # Issue #68: full tool result
                             # RFC #41: Agent tracking fields
                             agent_id=agent_id,
                             is_sidechain=is_sidechain,
@@ -334,6 +414,7 @@ def parse_entry(raw: dict, project_path: str) -> list[Event]:
                         entry_type="command" if command_name else "user",
                         skill_name=command_name,  # Reuse skill_name for command tracking
                         user_message_text=user_message_text,
+                        message_text=message_text,  # Issue #68: unified message text
                         git_branch=git_branch,
                         cwd=cwd,
                         # RFC #41: Agent tracking fields
@@ -354,6 +435,7 @@ def parse_entry(raw: dict, project_path: str) -> list[Event]:
                     entry_type="command" if command_name else "user",
                     skill_name=command_name,  # Reuse skill_name for command tracking
                     user_message_text=user_message_text,
+                    message_text=message_text,  # Issue #68: unified message text
                     git_branch=git_branch,
                     cwd=cwd,
                     # RFC #41: Agent tracking fields
@@ -365,6 +447,10 @@ def parse_entry(raw: dict, project_path: str) -> list[Event]:
 
     # Handle summary entries
     elif entry_type == "summary":
+        # Issue #68: Extract summary text
+        summary_content = message.get("content", "") if message else raw.get("summary", "")
+        summary_text = extract_text_from_content(summary_content)
+
         events.append(
             Event(
                 id=None,
@@ -373,6 +459,7 @@ def parse_entry(raw: dict, project_path: str) -> list[Event]:
                 session_id=session_id if session_id else "unknown",
                 project_path=project_path,
                 entry_type="summary",
+                message_text=summary_text,  # Issue #68: unified message text
                 # RFC #41: Agent tracking fields
                 agent_id=agent_id,
                 is_sidechain=is_sidechain,

@@ -1,5 +1,7 @@
 """SQLite storage backend for session analytics."""
 
+from __future__ import annotations
+
 import json
 import logging
 import os
@@ -63,7 +65,8 @@ class Event:
     cwd: str | None = None
 
     # RFC #17 Phase 1 additions
-    user_message_text: str | None = None  # For user journey tracking
+    user_message_text: str | None = None  # For user journey tracking (deprecated, use message_text)
+    message_text: str | None = None  # Unified text content for all entry types (user/assistant/tool_result/summary)
     # TODO(Phase 4): exit_code is not currently available in Claude Code JSONL format.
     # The toolUseResult has stdout/stderr/interrupted but no exit code.
     # This field is reserved for future extraction when format changes or
@@ -166,7 +169,7 @@ class BusEvent:
 DEFAULT_DB_PATH = Path.home() / ".claude" / "contrib" / "analytics" / "data.db"
 
 # Schema version for migrations
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 
 # Migration functions: dict of version -> (migration_name, migration_func)
 # Each migration upgrades FROM version-1 TO version
@@ -390,6 +393,89 @@ def migrate_v7(conn):
     conn.execute("CREATE INDEX IF NOT EXISTS idx_events_tool_id ON events(tool_id)")
 
 
+@migration(8, "add_unified_message_text")
+def migrate_v8(conn):
+    """Add unified message_text column for all entry types and rebuild FTS.
+
+    Issue #68: Previously only user messages had text captured. This migration:
+    1. Adds message_text column for user/assistant/tool_result/summary text
+    2. Copies existing user_message_text to message_text
+    3. Rebuilds FTS index on the new unified column
+
+    The old user_message_text column is kept for backwards compatibility
+    but is deprecated. Data will be backfilled via re-ingestion.
+    """
+    # Add message_text column
+    existing_cols = {row[1] for row in conn.execute("PRAGMA table_info(events)")}
+    if "message_text" not in existing_cols:
+        conn.execute("ALTER TABLE events ADD COLUMN message_text TEXT")
+
+    # Copy existing user_message_text to message_text
+    conn.execute("""
+        UPDATE events
+        SET message_text = user_message_text
+        WHERE user_message_text IS NOT NULL AND message_text IS NULL
+    """)
+
+    # Drop old FTS triggers
+    conn.execute("DROP TRIGGER IF EXISTS events_fts_insert")
+    conn.execute("DROP TRIGGER IF EXISTS events_fts_delete")
+    conn.execute("DROP TRIGGER IF EXISTS events_fts_update")
+
+    # Drop old FTS table
+    conn.execute("DROP TABLE IF EXISTS events_fts")
+
+    # Create new FTS table on message_text
+    conn.execute("""
+        CREATE VIRTUAL TABLE IF NOT EXISTS events_fts USING fts5(
+            message_text,
+            content='events',
+            content_rowid='id'
+        )
+    """)
+
+    # Populate FTS index from all events with message_text
+    conn.execute("""
+        INSERT INTO events_fts(rowid, message_text)
+        SELECT id, message_text FROM events WHERE message_text IS NOT NULL
+    """)
+
+    # Create triggers to keep FTS in sync
+    conn.execute("""
+        CREATE TRIGGER IF NOT EXISTS events_fts_insert AFTER INSERT ON events
+        WHEN NEW.message_text IS NOT NULL
+        BEGIN
+            INSERT INTO events_fts(rowid, message_text) VALUES (NEW.id, NEW.message_text);
+        END
+    """)
+
+    conn.execute("""
+        CREATE TRIGGER IF NOT EXISTS events_fts_delete AFTER DELETE ON events
+        WHEN OLD.message_text IS NOT NULL
+        BEGIN
+            INSERT INTO events_fts(events_fts, rowid, message_text)
+            VALUES ('delete', OLD.id, OLD.message_text);
+        END
+    """)
+
+    conn.execute("""
+        CREATE TRIGGER IF NOT EXISTS events_fts_update AFTER UPDATE OF message_text ON events
+        WHEN OLD.message_text IS NOT NULL OR NEW.message_text IS NOT NULL
+        BEGIN
+            INSERT INTO events_fts(events_fts, rowid, message_text)
+            SELECT 'delete', OLD.id, OLD.message_text WHERE OLD.message_text IS NOT NULL;
+            INSERT INTO events_fts(rowid, message_text)
+            SELECT NEW.id, NEW.message_text WHERE NEW.message_text IS NOT NULL;
+        END
+    """)
+
+    # Add partial index for efficient message_text queries
+    conn.execute("""
+        CREATE INDEX IF NOT EXISTS idx_events_has_message_text
+        ON events(id) WHERE message_text IS NOT NULL
+    """)
+
+
 class SQLiteStorage:
     """SQLite-backed storage for session analytics."""
 
@@ -468,8 +554,10 @@ class SQLiteStorage:
     def _get_schema_version(self, conn: sqlite3.Connection) -> int:
         """Get current schema version from database."""
         try:
-            row = conn.execute("SELECT version FROM schema_version LIMIT 1").fetchone()
-            return row[0] if row else 0
+            row = conn.execute(
+                "SELECT MAX(version) FROM schema_version"
+            ).fetchone()
+            return row[0] if row and row[0] else 0
         except sqlite3.OperationalError:
             # Table doesn't exist yet
             return 0
@@ -530,6 +618,7 @@ class SQLiteStorage:
 
                     -- RFC #17 Phase 1 additions
                     user_message_text TEXT,
+                    message_text TEXT,
                     exit_code INTEGER,
 
                     -- RFC #41: Agent tracking and token deduplication
@@ -632,50 +721,6 @@ class SQLiteStorage:
                 "ON session_commits(commit_sha)"
             )
 
-            # FTS5 full-text search on user_message_text (RFC #17 Phase 1)
-            conn.execute("""
-                CREATE VIRTUAL TABLE IF NOT EXISTS events_fts USING fts5(
-                    user_message_text,
-                    content='events',
-                    content_rowid='id'
-                )
-            """)
-
-            # Triggers to keep FTS in sync with events table
-            conn.execute("""
-                CREATE TRIGGER IF NOT EXISTS events_fts_insert AFTER INSERT ON events
-                WHEN NEW.user_message_text IS NOT NULL
-                BEGIN
-                    INSERT INTO events_fts(rowid, user_message_text) VALUES (NEW.id, NEW.user_message_text);
-                END
-            """)
-
-            conn.execute("""
-                CREATE TRIGGER IF NOT EXISTS events_fts_delete AFTER DELETE ON events
-                WHEN OLD.user_message_text IS NOT NULL
-                BEGIN
-                    INSERT INTO events_fts(events_fts, rowid, user_message_text)
-                    VALUES ('delete', OLD.id, OLD.user_message_text);
-                END
-            """)
-
-            conn.execute("""
-                CREATE TRIGGER IF NOT EXISTS events_fts_update AFTER UPDATE OF user_message_text ON events
-                WHEN OLD.user_message_text IS NOT NULL OR NEW.user_message_text IS NOT NULL
-                BEGIN
-                    INSERT INTO events_fts(events_fts, rowid, user_message_text)
-                    SELECT 'delete', OLD.id, OLD.user_message_text WHERE OLD.user_message_text IS NOT NULL;
-                    INSERT INTO events_fts(rowid, user_message_text)
-                    SELECT NEW.id, NEW.user_message_text WHERE NEW.user_message_text IS NOT NULL;
-                END
-            """)
-
-            # Partial index for efficiently querying events with user messages
-            conn.execute("""
-                CREATE INDEX IF NOT EXISTS idx_events_has_user_message
-                ON events(id) WHERE user_message_text IS NOT NULL
-            """)
-
             # Event-bus integration for cross-session insights (RFC #54)
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS bus_events (
@@ -719,6 +764,51 @@ class SQLiteStorage:
             # Performance index for tool_use ↔ tool_result self-joins (migration v7)
             conn.execute("CREATE INDEX IF NOT EXISTS idx_events_tool_id ON events(tool_id)")
 
+            # FTS5 full-text search on message_text (Issue #68: unified text for all entry types)
+            # Run AFTER migrations so message_text column exists on both fresh and migrated DBs
+            conn.execute("""
+                CREATE VIRTUAL TABLE IF NOT EXISTS events_fts USING fts5(
+                    message_text,
+                    content='events',
+                    content_rowid='id'
+                )
+            """)
+
+            # Triggers to keep FTS in sync with events table
+            conn.execute("""
+                CREATE TRIGGER IF NOT EXISTS events_fts_insert AFTER INSERT ON events
+                WHEN NEW.message_text IS NOT NULL
+                BEGIN
+                    INSERT INTO events_fts(rowid, message_text) VALUES (NEW.id, NEW.message_text);
+                END
+            """)
+
+            conn.execute("""
+                CREATE TRIGGER IF NOT EXISTS events_fts_delete AFTER DELETE ON events
+                WHEN OLD.message_text IS NOT NULL
+                BEGIN
+                    INSERT INTO events_fts(events_fts, rowid, message_text)
+                    VALUES ('delete', OLD.id, OLD.message_text);
+                END
+            """)
+
+            conn.execute("""
+                CREATE TRIGGER IF NOT EXISTS events_fts_update AFTER UPDATE OF message_text ON events
+                WHEN OLD.message_text IS NOT NULL OR NEW.message_text IS NOT NULL
+                BEGIN
+                    INSERT INTO events_fts(events_fts, rowid, message_text)
+                    SELECT 'delete', OLD.id, OLD.message_text WHERE OLD.message_text IS NOT NULL;
+                    INSERT INTO events_fts(rowid, message_text)
+                    SELECT NEW.id, NEW.message_text WHERE NEW.message_text IS NOT NULL;
+                END
+            """)
+
+            # Partial index for efficiently querying events with messages
+            conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_events_has_message_text
+                ON events(id) WHERE message_text IS NOT NULL
+            """)
+
     # Event operations
 
     def add_event(self, event: Event) -> Event:
@@ -731,9 +821,9 @@ class SQLiteStorage:
                     tool_name, tool_input_json, tool_id, is_error,
                     command, command_args, file_path, skill_name,
                     input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens, model,
-                    git_branch, cwd, user_message_text, exit_code,
+                    git_branch, cwd, user_message_text, message_text, exit_code,
                     parent_uuid, agent_id, is_sidechain, version
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     event.uuid,
@@ -757,6 +847,7 @@ class SQLiteStorage:
                     event.git_branch,
                     event.cwd,
                     event.user_message_text,
+                    event.message_text,
                     event.exit_code,
                     event.parent_uuid,
                     event.agent_id,
@@ -777,9 +868,9 @@ class SQLiteStorage:
                     tool_name, tool_input_json, tool_id, is_error,
                     command, command_args, file_path, skill_name,
                     input_tokens, output_tokens, cache_read_tokens, cache_creation_tokens, model,
-                    git_branch, cwd, user_message_text, exit_code,
+                    git_branch, cwd, user_message_text, message_text, exit_code,
                     parent_uuid, agent_id, is_sidechain, version
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 [
                     (
@@ -804,6 +895,7 @@ class SQLiteStorage:
                         e.git_branch,
                         e.cwd,
                         e.user_message_text,
+                        e.message_text,
                         e.exit_code,
                         e.parent_uuid,
                         e.agent_id,
@@ -900,6 +992,7 @@ class SQLiteStorage:
             git_branch=row["git_branch"],
             cwd=row["cwd"],
             user_message_text=get_col("user_message_text"),
+            message_text=get_col("message_text"),
             exit_code=get_col("exit_code"),
             # RFC #41: Agent tracking
             parent_uuid=get_col("parent_uuid"),
@@ -1293,46 +1386,69 @@ class SQLiteStorage:
 
     # Full-text search operations
 
-    def search_user_messages(
-        self, query: str, limit: int = 100, project: str | None = None
+    def search_messages(
+        self,
+        query: str,
+        limit: int = 100,
+        project: str | None = None,
+        entry_types: list[str] | None = None,
     ) -> list[Event]:
-        """Search user messages using full-text search.
+        """Search messages using full-text search.
+
+        Searches across all message types (user, assistant, tool_result, summary)
+        stored in the message_text column.
 
         Args:
             query: FTS5 query string (supports AND, OR, NOT, phrases, etc.)
             limit: Maximum number of results
             project: Optional project path filter (LIKE %project%)
+            entry_types: Optional list of entry types to filter (e.g., ["user", "assistant"])
 
         Returns:
             List of Event objects matching the search query
         """
         with self._connect() as conn:
-            # Use FTS5 MATCH to search, join back to events for full data
+            # Build base query with optional filters
+            params: list = [query]
+            filters = []
+
             if project:
-                rows = conn.execute(
-                    """
-                    SELECT events.* FROM events
-                    INNER JOIN events_fts ON events.id = events_fts.rowid
-                    WHERE events_fts MATCH ?
-                      AND events.project_path LIKE ?
-                    ORDER BY rank
-                    LIMIT ?
-                    """,
-                    (query, f"%{project}%", limit),
-                ).fetchall()
-            else:
-                rows = conn.execute(
-                    """
-                    SELECT events.* FROM events
-                    INNER JOIN events_fts ON events.id = events_fts.rowid
-                    WHERE events_fts MATCH ?
-                    ORDER BY rank
-                    LIMIT ?
-                    """,
-                    (query, limit),
-                ).fetchall()
+                filters.append("events.project_path LIKE ?")
+                params.append(f"%{project}%")
+
+            if entry_types:
+                placeholders = ",".join("?" * len(entry_types))
+                filters.append(f"events.entry_type IN ({placeholders})")
+                params.extend(entry_types)
+
+            filter_clause = ""
+            if filters:
+                filter_clause = "AND " + " AND ".join(filters)
+
+            params.append(limit)
+
+            rows = conn.execute(
+                f"""
+                SELECT events.* FROM events
+                INNER JOIN events_fts ON events.id = events_fts.rowid
+                WHERE events_fts MATCH ?
+                {filter_clause}
+                ORDER BY rank
+                LIMIT ?
+                """,
+                tuple(params),
+            ).fetchall()
 
             return [self._row_to_event(row) for row in rows]
+
+    def search_user_messages(
+        self, query: str, limit: int = 100, project: str | None = None
+    ) -> list[Event]:
+        """Search user messages using full-text search.
+
+        Deprecated: Use search_messages() instead.
+        """
+        return self.search_messages(query, limit, project, entry_types=["user"])
 
     # Utility operations
 
